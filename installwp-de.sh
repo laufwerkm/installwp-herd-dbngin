@@ -242,11 +242,11 @@ download_wp_core() {
 
   # Falls keine URL übergeben wurde: versuche sie aus dem API zu holen (für „latest“).
   if [ -z "${url:-}" ]; then
-	    # NOTE (macOS Bash 3.2): Do NOT combine a pipe into `python3 -` with a heredoc.
-	    # A heredoc overrides stdin. We therefore fetch JSON first, then parse via ENV.
-	    local _api_json
-	    _api_json="$(curl -fsSL "https://api.wordpress.org/core/version-check/1.7/?channel=${channel}&locale=${locale}" 2>/dev/null || true)"
-	    url="$(API_JSON="${_api_json}" CHANNEL="${channel}" python3 - <<'PY'
+      # NOTE (macOS Bash 3.2): Do NOT combine a pipe into `python3 -` with a heredoc.
+      # A heredoc overrides stdin. We therefore fetch JSON first, then parse via ENV.
+      local _api_json
+      _api_json="$(curl -fsSL "https://api.wordpress.org/core/version-check/1.7/?channel=${channel}&locale=${locale}" 2>/dev/null || true)"
+      url="$(API_JSON="${_api_json}" CHANNEL="${channel}" python3 - <<'PY'
 import os, json, re
 s=os.environ.get('API_JSON','')
 channel=(os.environ.get('CHANNEL') or 'stable').strip().lower()
@@ -430,11 +430,11 @@ echo "Das Script hat einen ZIP-Fallback – trotzdem kann ein höheres Limit hel
 ans_mem="$(confirm_yn "Memory-Limit für WP-CLI erhöhen?" "n")"
 if [ "$ans_mem" = "y" ]; then
   read -r -p "Neues Memory-Limit (z.B. 512M, 1024M) [${WP_CLI_MEMORY_LIMIT}]: " _ml
-	  _ml="$(trim "${_ml:-$WP_CLI_MEMORY_LIMIT}")"
-	  WP_CLI_MEMORY_LIMIT="$(normalize_mem_limit "$_ml")"
+    _ml="$(trim "${_ml:-$WP_CLI_MEMORY_LIMIT}")"
+    WP_CLI_MEMORY_LIMIT="$(normalize_mem_limit "$_ml")"
 fi
-	# Sicherheitshalber immer normalisieren (verhindert "512 bytes")
-	WP_CLI_MEMORY_LIMIT="$(normalize_mem_limit "$WP_CLI_MEMORY_LIMIT")"
+  # Sicherheitshalber immer normalisieren (verhindert "512 bytes")
+  WP_CLI_MEMORY_LIMIT="$(normalize_mem_limit "$WP_CLI_MEMORY_LIMIT")"
 
 
 # Best-effort: letzte Stable-Version ermitteln (für Nightly-Label)
@@ -704,7 +704,7 @@ echo -e "${BLUE}DB-Check (DBngin):${NC}"
 if ! mysql_can_connect; then
   echo -e "${RED}✗ Kann nicht zu MySQL verbinden.${NC}"
   echo "• Bitte starte DBngin und einen MySQL/MariaDB Service (Port/Host: ${DB_HOST})."
-  echo "• Wenn du einen anderen Host/Port nutzt, passe DB_HOST/DB_USER im Script an."
+  echo "• Wenn du mysql lokal installiert hast, füge es zum PATH hinzu."
   exit 1
 fi
 
@@ -783,7 +783,7 @@ INSTALL_ADMINER="$(confirm_yn "Adminer (WP Adminer) installieren?" "y")"
 INSTALL_WC="$(confirm_yn "WooCommerce installieren?" "n")"
 INSTALL_YOAST="$(confirm_yn "Yoast SEO installieren?" "n")"
 INSTALL_CF7="$(confirm_yn "Contact Form 7 installieren?" "n")"
-INSTALL_ELEMENTOR="$(confirm_yn "Elementor installieren? (wird standardmäßig NICHT aktiviert)" "n")"
+INSTALL_ELEMENTOR="$(confirm_yn "Elementor installieren?" "n")"
 INSTALL_ACF="$(confirm_yn "Advanced Custom Fields (ACF) installieren?" "n")"
 
 EXTRA_PLUGINS=()
@@ -890,7 +890,7 @@ echo "Database Name:  $DB_NAME"
 echo "WP-CLI Memory:  ${WP_CLI_MEMORY_LIMIT}"
 
 echo ""
-echo "Plugins (install):"
+echo "Plugins (install only):"
 echo "  • Query Monitor:   $INSTALL_QUERY_MONITOR"
 echo "  • Debug Bar:       $INSTALL_DEBUG_BAR"
 echo "  • Adminer:         $INSTALL_ADMINER"
@@ -902,6 +902,8 @@ echo "  • ACF:             $INSTALL_ACF"
 if [ "${#EXTRA_PLUGINS[@]}" -gt 0 ]; then
   echo "  • Extra:           ${EXTRA_PLUGINS[*]}"
 fi
+
+# HINWEIS: Dieser Block wurde entfernt, da die Sprach-Finalisierung nun am Ende nach allen Schritten erfolgt.
 
 echo ""
 if [ "${#PLUGIN_LINK_NAMES[@]}" -gt 0 ]; then
@@ -962,7 +964,7 @@ fi
 # 1) Create site directory
 
 echo ""
-echo -e "${BLUE}[1/9] Erstelle Site-Ordner...${NC}"
+echo -e "${BLUE}[1/8] Erstelle Site-Ordner...${NC}"
 mkdir -p "$SITE_ROOT"
 cd "$SITE_ROOT"
 echo -e "${GREEN}✓ Ordner erstellt: $PWD${NC}"
@@ -970,14 +972,14 @@ echo -e "${GREEN}✓ Ordner erstellt: $PWD${NC}"
 # 2) Create database
 
 echo ""
-echo -e "${BLUE}[2/9] Erstelle Datenbank...${NC}"
+echo -e "${BLUE}[2/8] Erstelle Datenbank...${NC}"
 mysql_exec "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;"
 echo -e "${GREEN}✓ Datenbank '${DB_NAME}' bereit.${NC}"
 
 # 3) Download WordPress
 
 echo ""
-echo -e "${BLUE}[3/9] WordPress Core installieren...${NC}"
+echo -e "${BLUE}[3/8] WordPress Core installieren...${NC}"
 if command -v curl >/dev/null 2>&1; then
   echo "• Connectivity-Check: wordpress.org ..."
   curl -Is https://wordpress.org/ | head -n 1 || true
@@ -993,9 +995,55 @@ download_wp_core "$WP_CHANNEL" "$WP_LOCALE" "$WP_VERSION" "${WP_DOWNLOAD_URL:-}"
 
 # 4) Create wp-config
 
+DB_PREFIX="wp_"
+
+use_custom_prefix="$(confirm_yn "Einen eigenen Tabellenprefix erstellen? (Default: wp_)" "n")"
+if [ "$use_custom_prefix" = "y" ]; then
+  read -r -p "Prefix suffix (e.g. museum) [leave empty to keep wp_]: " DB_PREFIX_SUFFIX
+  DB_PREFIX_SUFFIX="$(echo "${DB_PREFIX_SUFFIX:-}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_')"
+  if [ -n "$DB_PREFIX_SUFFIX" ]; then
+    DB_PREFIX="wp_${DB_PREFIX_SUFFIX}_"
+  fi
+fi
+
+run_wp_best_effort() {
+  # Best-effort wrapper: Führt den Befehl in einer Subshell aus und gibt den Exit-Code
+  # zurück, ohne den ERR-Trap des Hauptskripts auszulösen.
+  
+  # Speichere den Rückgabewert des WP-CLI Befehls
+  local rc=0
+
+  # Führe den WP-CLI-Befehl in einer Subshell aus
+  (
+    # Aktiviere temporär den ursprünglichen ERR-Trap, falls er definiert war
+    local old_trap
+    old_trap="$(trap -p ERR || true)"
+    eval "$old_trap" 2>/dev/null || true
+    
+    # Deaktiviere set -e und ERR-Trap in dieser Subshell
+    set +e
+    trap - ERR
+
+    # Führe den Befehl aus
+    run_wp "$@"
+    
+    # Speichere den Exit-Code der Subshell
+    exit $?
+  )
+  
+  # Speichere den Exit-Code der Subshell
+  rc=$?
+  
+  # Der Hauptskript-Trap und set -e bleiben unberührt.
+  return $rc
+}
+
 echo ""
-echo -e "${BLUE}[4/9] Erstelle wp-config.php...${NC}"
-run_wp config create --dbname="$DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASSWORD" --dbhost="$DB_HOST"
+echo -e "${BLUE}[4/8] Erstelle wp-config.php...${NC}"
+run_wp config create \
+  --dbname="$DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASSWORD" --dbhost="$DB_HOST" --dbprefix="$DB_PREFIX" \
+  --skip-check --force
+
 run_wp config set WP_DEBUG true --raw
 run_wp config set WP_DEBUG_LOG true --raw
 run_wp config set WP_DEBUG_DISPLAY false --raw
@@ -1006,7 +1054,7 @@ echo -e "${GREEN}✓ wp-config.php erstellt (Debug-Mode aktiviert)${NC}"
 # 5) Install WordPress
 
 echo ""
-echo -e "${BLUE}[5/9] Installiere WordPress...${NC}"
+echo -e "${BLUE}[5/8] Installiere WordPress...${NC}"
 run_wp core install --url="$WP_URL" --title="$WP_TITLE" --admin_user="$WP_ADMIN_USER" --admin_password="$WP_ADMIN_PASSWORD" --admin_email="$WP_ADMIN_EMAIL" --skip-email
 
 echo -e "${GREEN}✓ WordPress installiert${NC}"
@@ -1014,7 +1062,7 @@ echo -e "${GREEN}✓ WordPress installiert${NC}"
 # 5b) Activate locale (esp. important if core came from generic ZIP or nightly)
 
 echo ""
-echo -e "${BLUE}[6/9] Sprache aktivieren...${NC}"
+echo -e "${BLUE}[6/8] Sprache aktivieren...${NC}"
 # Best-effort: install & activate language pack
 set +e
 run_wp language core install "$WP_LOCALE" --activate >/dev/null 2>&1
@@ -1026,10 +1074,10 @@ else
   echo -e "${GREEN}✓ Sprache '$WP_LOCALE' aktiviert.${NC}"
 fi
 
-# 6) Create plugin symlinks
+# 7) Create plugin symlinks
 
 echo ""
-echo -e "${BLUE}[7/9] Erstelle Plugin-Symlinks...${NC}"
+echo -e "${BLUE}[7/8] Erstelle Plugin-Symlinks...${NC}"
 if [ "${#PLUGIN_LINK_NAMES[@]}" -eq 0 ]; then
   echo -e "${YELLOW}↷ Keine Symlinks vorgemerkt${NC}"
 else
@@ -1065,61 +1113,76 @@ else
   done
 fi
 
-# 7) Install plugins
+# 8) Install plugins (only install, no activation)
 
 echo ""
-echo -e "${BLUE}[8/9] Installiere Plugins...${NC}"
+echo -e "${BLUE}[8/8] Installiere Plugins (keine Aktivierung)...${NC}"
 
 install_plugin_if() {
   local flag="$1"; shift
   local slug="$1"; shift
-  local activate="${1:-yes}"
+  local activate="${1:-no}" # GEÄNDERT: Default auf "no"
   if [ "$flag" = "y" ]; then
     if [ "$activate" = "yes" ]; then
       echo "• Installing $slug (activate)..."
       run_wp plugin install "$slug" --activate
     else
+      # Alle Plugins werden nur installiert (no activate)
       echo "• Installing $slug (no activate)..."
       run_wp plugin install "$slug"
     fi
+    
+    # NEU: Installiere das Sprachpaket für dieses Plugin
+    if [ "$WP_LOCALE" != "en_US" ]; then
+      set +e
+      run_wp language plugin install "$slug" "$WP_LOCALE" --skip-activate >/dev/null 2>&1 || true
+      set -e
+    fi
+
     echo -e "${GREEN}  ✓ $slug installiert${NC}"
   fi
 }
 
-install_plugin_if "$INSTALL_QUERY_MONITOR" "query-monitor" "yes"
-install_plugin_if "$INSTALL_DEBUG_BAR" "debug-bar" "yes"
+# ----------------------------------------------------
+# Alle Standard-Plugins (install, no activate)
+# ----------------------------------------------------
+
+install_plugin_if "$INSTALL_QUERY_MONITOR" "query-monitor" "no"
+install_plugin_if "$INSTALL_DEBUG_BAR" "debug-bar" "no"
+
 # Adminer: correct WordPress.org slug is pexlechris-adminer
-install_plugin_if "$INSTALL_ADMINER" "pexlechris-adminer" "yes"
+install_plugin_if "$INSTALL_ADMINER" "pexlechris-adminer" "no"
 if [ "$INSTALL_ADMINER" = "y" ]; then
-  echo "  → Zugriff: wp-admin → Tools → Adminer"
+  echo "  → Zugriff: wp-admin → Tools → Adminer (Nach Aktivierung)"
 fi
 
-install_plugin_if "$INSTALL_WC" "woocommerce" "yes"
-if [ "$INSTALL_WC" = "y" ]; then
-  # WooCommerce onboarding tweaks (best-effort)
-  try_run_wp option update woocommerce_onboarding_opt_in no >/dev/null 2>&1 || true
-  try_run_wp option update woocommerce_task_list_hidden yes >/dev/null 2>&1 || true
-fi
+# Woocommerce (install, no activate)
+install_plugin_if "$INSTALL_WC" "woocommerce" "no"
 
-install_plugin_if "$INSTALL_YOAST" "wordpress-seo" "yes"
-install_plugin_if "$INSTALL_CF7" "contact-form-7" "yes"
+install_plugin_if "$INSTALL_YOAST" "wordpress-seo" "no"
+install_plugin_if "$INSTALL_CF7" "contact-form-7" "no"
 install_plugin_if "$INSTALL_ELEMENTOR" "elementor" "no"
-install_plugin_if "$INSTALL_ACF" "advanced-custom-fields" "yes"
+install_plugin_if "$INSTALL_ACF" "advanced-custom-fields" "no"
 
+# ----------------------------------------------------
+# Extra Plugins (install, no activate)
+# ----------------------------------------------------
 if [ "${#EXTRA_PLUGINS[@]}" -gt 0 ]; then
   echo ""
-  echo -e "${YELLOW}Extra Plugins:${NC}"
+  echo -e "${YELLOW}Extra Plugins (no activate):${NC}"
   for p in "${EXTRA_PLUGINS[@]}"; do
-    echo "• Installing $p (activate)..."
-    run_wp plugin install "$p" --activate
-    echo -e "${GREEN}  ✓ $p installiert${NC}"
+    # 'y' als Flag, da das Plugin in der Liste der Extras ist.
+    # 'no' als Aktivierungs-Parameter.
+    install_plugin_if "y" "$p" "no"
   done
 fi
 
-# 8) Install theme(s)
+echo -e "${GREEN}✓ Plugins installiert (nicht aktiviert)${NC}"
+
+# 9) Install theme(s)
 
 echo ""
-echo -e "${BLUE}[9/9] Installiere Theme(s)...${NC}"
+echo -e "${BLUE}[9/8 - Fortsetzung] Installiere Theme(s)...${NC}"
 
 case "$THEME_CHOICE" in
   1)
@@ -1166,28 +1229,26 @@ case "$THEME_CHOICE" in
     ;;
 esac
 
-echo -e "${GREEN}✓ Plugins & Themes installiert${NC}"
+echo -e "${GREEN}✓ Theme installiert/aktiviert${NC}"
 
-# ---------- Useful settings ----------
+
+# ---------- Useful settings (Only Permalinks remain) ----------
 echo ""
-echo -e "${BLUE}Nützliche Einstellungen…${NC}"
-# Herd nutzt keinen Apache/.htaccess – daher ohne --hard, um .htaccess-Warnungen zu vermeiden.
-run_wp rewrite structure '/%postname%/' 2> >(grep -Eiv "Could not open input file: .*/Library/Application( |$)" >&2)
-run_wp option update default_comment_status closed
-run_wp option update timezone_string 'Europe/Berlin'
+echo -e "${BLUE}[10/8] Nützliche Einstellungen (Permalinks)...${NC}"
+
+# 1. Permalinks (Post Name)
+echo -e "${BLUE}→ Setze Permalinks auf Post-Name (/sample-post/)...${NC}"
+run_wp option update permalink_structure '/%postname%/'
+
+echo -e "${GREEN}✓ Einstellungen abgeschlossen${NC}"
 
 echo ""
-create_content="$(confirm_yn "Test-Posts & Pages erstellen?" "n")"
-if [ "$create_content" = "y" ]; then
-  run_wp post create --post_title='Test Blog Post 1' --post_content='Dies ist ein Test-Beitrag für Featured Image Testing.' --post_status=publish --post_type=post
-  run_wp post create --post_title='Test Blog Post 2' --post_content='Dies ist ein weiterer Test-Beitrag.' --post_status=publish --post_type=post
-  run_wp post create --post_title='Test Page' --post_content='Dies ist eine Test-Seite.' --post_status=publish --post_type=page
-  if [ "$INSTALL_WC" = "y" ]; then
-    run_wp post create --post_title='Test Product 1' --post_content='Test product description' --post_status=publish --post_type=product
-    run_wp post create --post_title='Test Product 2' --post_content='Another test product' --post_status=publish --post_type=product
-  fi
-  echo -e "${GREEN}✓ Test-Inhalte erstellt${NC}"
-fi
+echo -e "${BLUE}→ Finalisiere Sprach-Einstellungen (Core & Plugins)...${NC}"
+# Dieser Befehl aktualisiert alle Sprachpakete, die zuvor nur installiert wurden,
+# und stellt sicher, dass das Backend die richtige Sprache verwendet.
+run_wp_best_effort language core update >/dev/null 2>&1 || true
+run_wp_best_effort language plugin update --all >/dev/null 2>&1 || true
+echo -e "${GREEN}✓ Sprach-Finalisierung abgeschlossen${NC}"
 
 # ---------- Final summary ----------
 echo ""
@@ -1196,8 +1257,8 @@ echo -e "${GREEN}✓ Installation Complete!${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
 echo "Site Details:"
-echo "  URL:              http://$WP_URL"
-echo "  Admin URL:        http://$WP_URL/wp-admin"
+echo "  URL:              $WP_URL"
+echo "  Admin URL:        $WP_URL/wp-admin"
 echo "  Database:         $DB_NAME"
 echo "  Admin User:       $WP_ADMIN_USER"
 echo "  Admin Password:   $WP_ADMIN_PASSWORD"
@@ -1222,6 +1283,7 @@ echo ""
 echo -e "${YELLOW}Nächste Schritte:${NC}"
 echo "1. Öffne http://$WP_URL in deinem Browser"
 echo "2. Login mit $WP_ADMIN_USER / $WP_ADMIN_PASSWORD"
-echo "3. Teste deine Features!"
+echo "3. Gehe zu 'Plugins' und aktiviere die gewünschten Erweiterungen."
+echo "4. Teste deine Features!"
 echo ""
 echo -e "${BLUE}Happy Testing! 🚀${NC}"

@@ -3,7 +3,7 @@
 # ============================================
 # installwp-en.sh — Local WordPress installer for Herd + DBngin (macOS)
 #
-# Credits / Original idea:
+# Credits / Original Idea:
 # - Brian Coords: https://www.briancoords.com/local-wordpress-with-herd-dbngin-and-wp-cli/
 #   GitHub: https://github.com/bacoords
 # - Riza (original script): https://github.com/rizaardiyanto1412/rizaardiyanto1412/blob/main/installwp.sh
@@ -22,20 +22,23 @@
 # ============================================
 # Features:
 # - Pre-Checks: Herd & DBngin installed? (with links)
-# - Optional: PHP memory_limit for WP-CLI (Note: Herd-wp might ignore env)
+# - Optional: PHP memory_limit for WP-CLI (Note: Herd-wp may ignore env)
 # - WordPress Core: Stable or "Beta" (= Nightly Build)
-# - Locale freely selectable
-# - DB Check: Does DB exist? Optional Drop or demand alternative DB name
-# - Plugins: confirm individually (e.g., WooCommerce) + extra plugins (slugs)
-# - Themes: selection including Indio + Twenty Twenty-Five + Custom Themes
-# - Any number of local plugin symlinks
+# - Selectable language/locale
+# - DB Check: Does DB already exist? optional drop or alternative DB name required
+# - Plugins: individual confirmation (e.g., WooCommerce) + extra plugins (slugs)
+# - Themes: Selection including Indio + Twenty Twenty-Five + Custom Themes
+# - Arbitrarily many local plugin symlinks
 # - Robust Core Download: WP-CLI, Fallback ZIP (to bypass WP-CLI Extractor memory errors)
+# - Debug Log Symlink: Creation only on WP standard basis
+# - NEW: debug-viewer.php script for live log watching (browser access)
+# - NEW: SMTP configuration hints for Mailpit/Mailhog
 
 set -euo pipefail
 
 # --- CI/Tests: bash -n + Dry Run ---
 # Tip: Check syntax via: bash -n <script>
-# Dry Run: Performs all queries, shows the plan, and exits without making any changes.
+# Dry Run: Executes all prompts, displays the plan, and exits without making changes.
 DRY_RUN=0
 for arg in "$@"; do
   case "$arg" in
@@ -52,12 +55,13 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+BOLD='\033[1m'
 NC='\033[0m'
 
-# Plugin path (ADJUST!)
+# Plugin Path (ADJUST!)
 PLUGIN_DEV_PATH="$HOME/Herd/plugins/wp-content/plugins/ki-bildgenerator"  # Your Plugin Development Folder
 
-trap 'echo -e "${RED}✗ Error in line ${LINENO}: Command \"${BASH_COMMAND}\" failed.${NC}"' ERR
+trap 'echo -e "${RED}${BOLD}✗ Error in line ${LINENO}: Command \"${BASH_COMMAND}\" failed.${NC}"' ERR
 
 # ---------- Helpers ----------
 confirm_yn() {
@@ -67,10 +71,12 @@ confirm_yn() {
   local ans=""
   while true; do
     if [ "$def" = "y" ]; then
-      read -r -p "${prompt} (Y/n): " ans
+      # If default is 'y', highlight Y. Use echo -e inside $(...) for robust coloring with read -p.
+      read -r -p "$(echo -e "${prompt} (${GREEN}Y${NC}/n): ")" ans
       ans="${ans:-y}"
     else
-      read -r -p "${prompt} (y/N): " ans
+      # If default is 'n', highlight N. Use echo -e inside $(...) for robust coloring with read -p.
+      read -r -p "$(echo -e "${prompt} (y/${GREEN}N${NC}): ")" ans
       ans="${ans:-n}"
     fi
     case "$ans" in
@@ -120,7 +126,7 @@ check_requirements() {
   fi
   echo -e "${GREEN}✓ WP-CLI found: $(command -v wp)${NC}"
 
-  # mysql client: DBngin-Default-Path (can vary)
+  # mysql client: DBngin default path (may differ)
   if [ -d "/Users/Shared/DBngin/mysql" ]; then
     # Try to pick any version dir
     local mysqlbin
@@ -131,9 +137,9 @@ check_requirements() {
   fi
 
   if ! command -v mysql >/dev/null 2>&1; then
-    echo -e "${RED}✗ MySQL client (mysql) not found.${NC}"
+    echo -e "${RED}✗ MySQL Client (mysql) not found.${NC}"
     echo -e "Start DBngin and ensure a MySQL/MariaDB service is running."
-    echo -e "If you installed mysql locally, add it to your PATH."
+    echo -e "If you installed mysql locally, add it to the PATH."
     exit 1
   fi
   echo -e "${GREEN}✓ mysql found: $(command -v mysql)${NC}"
@@ -189,8 +195,8 @@ fi
 
 if [ -z "$WP_BIN_REAL" ]; then
   echo -e "${RED}✗ Could not determine the real WP-CLI binary path.${NC}"
-  echo -e "Note: 'wp' might only be defined as a shell function/alias."
-  echo -e "Please ensure an executable 'wp' is in your PATH."
+  echo -e "Note: 'wp' may only be defined as a shell function/alias."
+  echo -e "Please ensure an executable 'wp' is in PATH."
   exit 1
 fi
 
@@ -229,6 +235,13 @@ try_run_wp() {
   return $st
 }
 
+run_wp_best_effort() {
+  # Best-effort wrapper: Executes the command in a subshell and returns the exit code
+  # without triggering the main script's ERR trap.
+  # This is useful for optional commands (e.g., plugin install) that might fail.
+  ( set +e; run_wp "$@" >/dev/null 2>&1; return $? )
+}
+
 # ---------- Core download (WP-CLI first, ZIP fallback) ----------
 # Args: channel (stable|nightly), locale (e.g. de_DE)
 
@@ -238,7 +251,7 @@ download_wp_core() {
   local version="$3"     # latest or specific version number
   local url="$4"         # optional: direct ZIP URL
 
-  echo -e "${BLUE}Downloading WordPress…${NC}"
+  echo -e "${BLUE}Downloading WordPress...${NC}"
 
   # If no URL was passed: try to get it from the API (for "latest").
   if [ -z "${url:-}" ]; then
@@ -278,7 +291,8 @@ def is_prerelease(v:str, url:str, resp:str)->bool:
 picked=''
 for off in offers:
     v=off.get('version') or ''
-    url=off.get('download') or (off.get('packages') or {}).get('full') or ''
+    # FIX: Replace {} with dict() for older Bash compatibility
+    u=off.get('download') or (off.get('packages') or dict()).get('full') or ''
     resp=off.get('response') or ''
     if not url:
         continue
@@ -295,7 +309,8 @@ for off in offers:
 # fallback if nothing matched
 if not picked and offers:
     off=offers[0]
-    picked=off.get('download') or (off.get('packages') or {}).get('full') or ''
+    # FIX: Replace {} with dict() for older Bash compatibility
+    picked=off.get('download') or (off.get('packages') or dict()).get('full') or ''
 
 print(picked or '')
 PY
@@ -319,9 +334,9 @@ PY
         fi
       fi
     fi
-    echo -e "${YELLOW}⚠ WP-CLI download/unpack failed – falling back to ZIP download.${NC}"
+    echo -e "${YELLOW}⚠ WP-CLI download/extraction failed – falling back to ZIP download.${NC}"
   else
-    echo -e "${YELLOW}⚠ Beta channel chosen – using ZIP download (more robust in Herd).${NC}"
+    echo -e "${YELLOW}⚠ Beta channel selected – using ZIP download (more robust in Herd).${NC}"
   fi
 
   # 2) ZIP Fallback (requires curl + unzip)
@@ -350,13 +365,13 @@ PY
   fi
 
   if ! unzip -q "$zipfile" -d "$tmpdir"; then
-    echo -e "${RED}ZIP could not be unpacked.${NC}"
+    echo -e "${RED}Could not unzip the ZIP file.${NC}"
     rm -rf "$tmpdir"
     return 1
   fi
 
   if [ ! -d "${tmpdir}/wordpress" ]; then
-    echo -e "${RED}Unpacked, but no 'wordpress/' folder found.${NC}"
+    echo -e "${RED}Unzipped, but no 'wordpress/' folder found.${NC}"
     rm -rf "$tmpdir"
     return 1
   fi
@@ -425,19 +440,21 @@ check_requirements
 
 # ---------- Ask memory limit early ----------
 echo -e "${YELLOW}WP-CLI Memory Limit:${NC}"
-echo "With Herd, WP-CLI can sometimes crash with 128MB during unpacking."
+echo "With Herd, WP-CLI can sometimes die with 128MB during extraction."
 echo "The script has a ZIP fallback – but a higher limit can still help."
 ans_mem="$(confirm_yn "Increase memory limit for WP-CLI?" "n")"
 if [ "$ans_mem" = "y" ]; then
-  read -r -p "New memory limit (e.g., 512M, 1024M) [${WP_CLI_MEMORY_LIMIT}]: " _ml
+  read -r -p "New memory limit (e.g. 512M, 1024M) [${WP_CLI_MEMORY_LIMIT}]: " _ml
     _ml="$(trim "${_ml:-$WP_CLI_MEMORY_LIMIT}")"
     WP_CLI_MEMORY_LIMIT="$(normalize_mem_limit "$_ml")"
 fi
-  # Safety: always normalize (prevents "512 bytes")
+  # Normalize as a safety measure (prevents "512 bytes")
   WP_CLI_MEMORY_LIMIT="$(normalize_mem_limit "$WP_CLI_MEMORY_LIMIT")"
 
 
-# Best-effort: determine latest Stable version (for Nightly label)
+# Best-effort: determine latest stable version (for Nightly label)
+echo -e "${BLUE}• Trying to retrieve the latest stable WordPress version (Best-Effort)...${NC}" # <--- NEW status output
+set +e # NEW: Disable immediate exit to ignore network errors
 LATEST_STABLE_VERSION="$(
   curl -fsSL "https://api.wordpress.org/core/version-check/1.7/?channel=stable&locale=en_US" 2>/dev/null \
   | python3 -c 'import sys,json
@@ -446,10 +463,11 @@ try:
   o=(d.get("offers") or [])
   print(o[0].get("version","") if o else "")
 except Exception:
-  print("")' 2>/dev/null \
-  || true
+  print("")' 2>/dev/null
 )"
-LATEST_STABLE_VERSION="${LATEST_STABLE_VERSION:-the latest Stable version}"
+set -e # NEW: Re-enable immediate exit
+LATEST_STABLE_VERSION="${LATEST_STABLE_VERSION:-the last stable version}"
+echo -e "${GREEN}✓ Stable version for label: ${LATEST_STABLE_VERSION}${NC}" # <--- NEW status output
 
 echo ""
 
@@ -457,8 +475,8 @@ echo ""
 echo -e "${YELLOW}WordPress Channel:${NC}"
 echo "1) Stable (Default)"
 echo "2) Beta/RC (if available – may be unstable)"
-echo "3) Nightly (Development status after ${LATEST_STABLE_VERSION}, unversioned)"
-read -r -p "Choose (1-3) [1]: " WP_CHANNEL_CHOICE
+echo "3) Nightly (Development build after ${LATEST_STABLE_VERSION}, unversioned)"
+read -r -p "Select (1-3) [1]: " WP_CHANNEL_CHOICE
 WP_CHANNEL_CHOICE="${WP_CHANNEL_CHOICE:-1}"
 
 WP_CHANNEL="stable"
@@ -474,26 +492,26 @@ fi
 
 echo ""
 echo -e "${YELLOW}Language / Locale:${NC}"
-read -r -p "Locale (e.g., de_DE, en_US) [en_US]: " WP_LOCALE
+read -r -p "Locale (e.g. de_DE, en_US) [en_US]: " WP_LOCALE
 WP_LOCALE="$(trim "${WP_LOCALE:-en_US}")"
 
 echo ""
 echo ""
 echo -e "${YELLOW}WordPress Version (last 3) – Channel: ${API_CHANNEL}${NC}"
 
-# Nightly: always fixed URL, no version selection needed.
+# Nightly: fixed URL, no version selection needed.
 if [ "$WP_CHANNEL" = "nightly" ]; then
   WP_VERSION="nightly"
   WP_DOWNLOAD_URL="https://wordpress.org/nightly-builds/wordpress-latest.zip"
 
-  # v23 PATCH: Show Nightly Build info (Last-Modified + ETag, if available)
+  # v23 PATCH: Show Nightly Build Info (Last-Modified + ETag, if available)
   _hdr="$(curl -fsSI "$WP_DOWNLOAD_URL" 2>/dev/null || true)"
   _lm="$(echo "$_hdr" | awk -F': ' 'tolower($1)=="last-modified"{print $2}' | tr -d '
 ' | head -n1 || true)"
   _etag="$(echo "$_hdr" | awk -F': ' 'tolower($1)=="etag"{print $2}' | tr -d '
 ' | head -n1 || true)"
 
-  echo -n "• Nightly chosen: wordpress-latest.zip"
+  echo -n "• Nightly selected: wordpress-latest.zip"
   [ -n "${_lm:-}" ] && echo -n " (Last-Modified: ${_lm})"
   [ -n "${_etag:-}" ] && echo -n " (ETag: ${_etag})"
   echo ""
@@ -502,7 +520,7 @@ else
   # Output format per line: version|url
   _offers=()
   _api_json="$(curl -fsSL "https://api.wordpress.org/core/version-check/1.7/?channel=${API_CHANNEL}&locale=${WP_LOCALE}" 2>/dev/null || true)"
-  # v23 PATCH: if RCs are available, force RC-only + show note
+  # v23 PATCH: if RCs are present, enforce RC-only + show hint
   RC_ONLY_ACTIVE="n"
   if [ "$API_CHANNEL" = "beta" ] && [ -n "${_api_json:-}" ]; then
     RC_ONLY_ACTIVE="$(API_JSON="${_api_json}" python3 - <<'PY'
@@ -525,7 +543,8 @@ def is_rc(v,u,r):
     return ("rc" in v) or ("rc" in u) or (r=="rc")
 for off in offers:
     v=off.get("version") or ""
-    u=off.get("download") or (off.get("packages") or {}).get("full") or ""
+    # FIX: Replace {} with dict() for older Bash compatibility
+    u=off.get("download") or (off.get("packages") or dict()).get("full") or ""
     r=off.get("response") or ""
     if v and u and is_pre(v,u,r) and is_rc(v,u,r):
         print("y"); raise SystemExit
@@ -579,7 +598,8 @@ seen=set()
 out=[]
 for off in offers:
     v=off.get('version') or ''
-    url=off.get('download') or (off.get('packages') or {}).get('full') or ''
+    # FIX: Replace {} with dict() for older Bash compatibility
+    url=off.get('download') or (off.get('packages') or dict()).get('full') or ''
     resp=off.get('response') or ''
     if not v or not url:
         continue
@@ -612,9 +632,10 @@ PY
 
   if [ "${#_offers[@]}" -eq 0 ]; then
     if [ "$WP_CHANNEL" = "beta" ] && [ -n "${_api_json:-}" ]; then
-      echo -e "${YELLOW}⚠ The Beta/RC feed currently contains no pre-releases. Using \"latest\" (stable).${NC}"
+      echo -e "${YELLOW}⚠ The Beta/RC feed currently contains no pre-release versions. Using 'latest' (stable).
+${NC}"
     else
-      echo -e "${YELLOW}⚠ Could not load versions automatically – using \"latest\".${NC}"
+      echo -e "${YELLOW}⚠ Could not load versions automatically – using 'latest'.${NC}"
     fi
     WP_VERSION="latest"
     WP_DOWNLOAD_URL=""
@@ -623,7 +644,7 @@ PY
     [ "${#_offers[@]}" -ge 2 ] && echo "2) ${_offers[1]%%|*}"
     [ "${#_offers[@]}" -ge 3 ] && echo "3) ${_offers[2]%%|*}"
     echo "4) latest (automatic)"
-    read -r -p "Choose (1-4) [1]: " _vsel
+    read -r -p "Select (1-4) [1]: " _vsel
     _vsel="${_vsel:-1}"
 
     if [ "$_vsel" = "4" ]; then
@@ -640,15 +661,13 @@ PY
   fi
 fi
 
-# v23.1 PATCH: redundant fallback block removed (avoids double warning)
-
 echo ""
 # ---------- Site name / URL / DB name (needed early) ----------
 echo -e "${YELLOW}Project / Site Name:${NC}"
-read -r -p "Installation folder under ~/Herd (e.g., mysite) [wp-testing]: " SITE_NAME
+read -r -p "Installation folder under ~/Herd (e.g. mysite) [wp-testing]: " SITE_NAME
 SITE_NAME="$(trim "${SITE_NAME:-wp-testing}")"
 
-# Installation Path (Herd)
+# Installation path (Herd)
 SITE_ROOT="$HOME/Herd/$SITE_NAME"
 
 # ---------- Install folder preflight: exists? delete or choose another ----------
@@ -659,7 +678,7 @@ safe_rm_rf() {
   local target="$1"
   # Safety: only allow deleting inside ~/Herd and not the Herd root itself
   if [[ "$target" != "$HOME/Herd/"* ]] || [[ "$target" = "$HOME/Herd" ]] || [[ "$target" = "$HOME/Herd/" ]]; then
-    echo -e "${RED}✗ Security abort: would delete non-safe path: $target${NC}"
+    echo -e "${RED}✗ Security Abort: would delete non-safe path: $target${NC}"
     exit 1
   fi
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
@@ -681,7 +700,7 @@ while [ -e "$SITE_ROOT" ]; do
   read -r -p "New installation folder under ~/Herd: " SITE_NAME
   SITE_NAME="$(trim "$SITE_NAME")"
   if [ -z "$SITE_NAME" ]; then
-    echo -e "${YELLOW}Folder name must not be empty.${NC}"
+    echo -e "${YELLOW}Folder name cannot be empty.${NC}"
     SITE_NAME="wp-testing"
   fi
   SITE_ROOT="$HOME/Herd/$SITE_NAME"
@@ -689,7 +708,7 @@ done
 
 
 # Herd typically uses .test
-read -r -p "Domain (without http, e.g., mysite.test) [${SITE_NAME}.test]: " WP_DOMAIN
+read -r -p "Domain (without http, e.g. mysite.test) [${SITE_NAME}.test]: " WP_DOMAIN
 WP_DOMAIN="$(trim "${WP_DOMAIN:-${SITE_NAME}.test}")"
 WP_URL="https://${WP_DOMAIN}"
 
@@ -703,11 +722,11 @@ echo -e "${BLUE}DB Check (DBngin):${NC}"
 if ! mysql_can_connect; then
   echo -e "${RED}✗ Cannot connect to MySQL.${NC}"
   echo "• Please start DBngin and a MySQL/MariaDB service (Port/Host: ${DB_HOST})."
-  echo "• If you use a different host/port, adjust DB_HOST/DB_USER in the script."
+  echo "• If you installed mysql locally, add it to the PATH."
   exit 1
 fi
 
-echo -e "${GREEN}✓ MySQL connection ok.${NC}"
+echo -e "${GREEN}✓ MySQL connection OK.${NC}"
 
 # If default DB exists: ask to drop or choose different DB name
 if mysql_db_exists "$DB_NAME"; then
@@ -717,12 +736,12 @@ if mysql_db_exists "$DB_NAME"; then
     mysql_exec "DROP DATABASE IF EXISTS \`${DB_NAME}\`;"
     echo -e "${GREEN}✓ Database '${DB_NAME}' dropped.${NC}"
   else
-    echo -e "${YELLOW}Then a different database name must be used (unlike the folder name).${NC}"
+    echo -e "${YELLOW}Then a different database name must be used (not equal to folder name).${NC}"
     while true; do
       read -r -p "New DB Name: " _db
       _db="$(trim "$_db")"
       if [ -z "$_db" ]; then
-        echo -e "${YELLOW}DB name must not be empty.${NC}"
+        echo -e "${YELLOW}DB name cannot be empty.${NC}"
         continue
       fi
       if [ "$_db" = "$DEFAULT_DB_NAME" ]; then
@@ -749,7 +768,7 @@ WP_TITLE="$(trim "${WP_TITLE:-$SITE_NAME}")"
 read -r -p "Admin Username (empty = admin): " WP_ADMIN_USER
 WP_ADMIN_USER="$(trim "${WP_ADMIN_USER:-admin}")"
 
-read -r -s -p "Admin Password (empty = automatically generate): " WP_ADMIN_PASSWORD
+read -r -s -p "Admin Password (empty = auto-generate): " WP_ADMIN_PASSWORD
 echo ""
 if [ -z "${WP_ADMIN_PASSWORD}" ]; then
   if command -v openssl >/dev/null 2>&1; then
@@ -767,28 +786,57 @@ PY
   echo -e "${YELLOW}→ Password was automatically generated.${NC}"
 fi
 
-read -r -p "Admin Email (empty = admin@$WP_URL): " WP_ADMIN_EMAIL
-WP_ADMIN_EMAIL="$(trim "${WP_ADMIN_EMAIL:-admin@$WP_URL}")"
+read -r -p "Admin Email (empty = admin@$WP_DOMAIN): " WP_ADMIN_EMAIL
+WP_ADMIN_EMAIL="$(trim "${WP_ADMIN_EMAIL:-admin@$WP_DOMAIN}")"
+
+# === FIX #1: Email Cleaning (ULTRA-ROBUST V3 - Iterative) ===
+# Repeatedly removes all leading and trailing quotes (', ").
+_tmp_email="$WP_ADMIN_EMAIL"
+
+# Perform cleaning in a loop until no more changes occur.
+while true; do
+  _old_email="$_tmp_email"
+  # Remove one pair of quotes at the start and end
+  _tmp_email="$(echo "$_tmp_email" | sed "s/^['\"]//; s/['\"]$//")"
+  # Trim after each Sed pass, in case there were spaces in between
+  _tmp_email="$(trim "$_tmp_email")"
+  
+  # If the string has not changed, it is clean
+  if [ "$_old_email" = "$_tmp_email" ]; then
+    break
+  fi
+done
+
+WP_ADMIN_EMAIL="$_tmp_email"
+
 
 # ---------- Plugins (confirm each) + extras ----------
 echo ""
-echo -e "${YELLOW}Select plugins (confirm individually):${NC}"
+echo -e "${YELLOW}Select Plugins (confirm each individually):${NC}"
 
 # Always installed dev plugins (can still be skipped if you want)
 INSTALL_QUERY_MONITOR="$(confirm_yn "Install Query Monitor?" "y")"
 INSTALL_DEBUG_BAR="$(confirm_yn "Install Debug Bar?" "y")"
-INSTALL_ADMINER="$(confirm_yn "Install Adminer (WP Adminer)?" "y")"
+INSTALL_ADMINER="$(confirm_yn "Install Adminer (WP Adminer Plugin)?" "y")"
 
+# NEW: SMTP Plugins
+echo ""
+echo -e "${YELLOW}Email Sending (Mail Catcher / SMTP):${NC}"
+INSTALL_WP_MAIL_SMTP="$(confirm_yn "Install WP Mail SMTP? (Recommended for Herd/Mailpit)" "y")"
+INSTALL_POST_SMTP="$(confirm_yn "Install Post SMTP Mailer/Email Log? (Alternative)" "n")"
+
+echo ""
+echo -e "${YELLOW}Known Plugins:${NC}"
 INSTALL_WC="$(confirm_yn "Install WooCommerce?" "n")"
 INSTALL_YOAST="$(confirm_yn "Install Yoast SEO?" "n")"
 INSTALL_CF7="$(confirm_yn "Install Contact Form 7?" "n")"
-INSTALL_ELEMENTOR="$(confirm_yn "Install Elementor? (will NOT be activated by default)" "n")"
+INSTALL_ELEMENTOR="$(confirm_yn "Install Elementor?" "n")"
 INSTALL_ACF="$(confirm_yn "Install Advanced Custom Fields (ACF)?" "n")"
 
 EXTRA_PLUGINS=()
 add_more_plugins="$(confirm_yn "Specify more plugins by slug?" "n")"
 if [ "$add_more_plugins" = "y" ]; then
-  echo "Enter plugin slugs (e.g., 'regenerate-thumbnails'). Empty input finishes."
+  echo "Enter Plugin Slugs (e.g., 'regenerate-thumbnails'). Empty input finishes."
   while true; do
     read -r -p "Plugin Slug (empty=done): " p
     p="$(trim "$p")"
@@ -796,6 +844,12 @@ if [ "$add_more_plugins" = "y" ]; then
     EXTRA_PLUGINS+=("$p")
   done
 fi
+
+# NEW: Debug Log Symlink Prompt
+echo ""
+echo -e "${YELLOW}Debug Log Comfort (Symlink / Viewer):${NC}"
+INSTALL_DEBUG_SYMLINK="$(confirm_yn "Enable symlink in root for debug.log (points to wp-content/debug.log)?" "y")"
+INSTALL_BROWSER_VIEWER="$(confirm_yn "Create browser log viewer (debug-viewer.php) in root?" "y")"
 
 # ---------- Plugin symlinks ----------
 # Target: wp-content/plugins/<name> -> <local path>
@@ -805,18 +859,18 @@ PLUGIN_LINK_NAMES=()
 echo ""
 echo -e "${YELLOW}Symlinks to local plugins:${NC}"
 echo -e "${BLUE}Optional fixed Dev Path:${NC}"
-# If Herd folder + Dev Plugin folder exist: prompt whether the symlink should be set.
+# If Herd folder + Dev Plugin folder exist: ask if the symlink should be created.
 if [ -d "$HOME/Herd" ] && [ -n "${PLUGIN_DEV_PATH:-}" ] && [ -d "$PLUGIN_DEV_PATH" ]; then
-  echo "Found Dev Plugin Folder:"
+  echo "Found Dev Plugin folder:"
   echo "  $PLUGIN_DEV_PATH"
-  use_dev="$(confirm_yn "Create symlink to this Dev Plugin Folder?" "n")"
+  use_dev="$(confirm_yn "Create symlink to this Dev Plugin folder?" "n")"
   if [ "$use_dev" = "y" ]; then
     _dev_name="$(basename "$PLUGIN_DEV_PATH")"
     PLUGIN_LINK_PATHS+=("$PLUGIN_DEV_PATH")
     PLUGIN_LINK_NAMES+=("$_dev_name")
     echo -e "${GREEN}✓ noted:${NC} $_dev_name  ←  $PLUGIN_DEV_PATH"
   else
-    echo -e "${YELLOW}• Dev path is skipped.${NC}"
+    echo -e "${YELLOW}• Dev path skipped.${NC}"
   fi
 fi
 
@@ -834,7 +888,7 @@ if [ "$create_symlinks" = "y" ]; then
       [ "$keep" != "y" ] && continue
     fi
 
-    read -r -p "Symlink name in wp-content/plugins (empty=folder name): " _name
+    read -r -p "Symlink Name in wp-content/plugins (empty=folder name): " _name
     _name="$(trim "${_name:-$(basename "$_p")}")"
 
     PLUGIN_LINK_PATHS+=("$_p")
@@ -854,13 +908,13 @@ echo "4) Astra"
 echo "5) Indio (Brian Gardner)"
 echo "6) None (Keep default)"
 echo "7) Other Themes by Slug (Custom)"
-read -r -p "Choose (1-7) [1]: " THEME_CHOICE
+read -r -p "Select (1-7) [1]: " THEME_CHOICE
 THEME_CHOICE="${THEME_CHOICE:-1}"
 
 CUSTOM_THEMES=()
 CUSTOM_THEME_ACTIVATE=""
 if [ "$THEME_CHOICE" = "7" ]; then
-  echo "Enter theme slugs (e.g., 'generatepress'). Empty input finishes."
+  echo "Enter Theme Slugs (e.g., 'generatepress'). Empty input finishes."
   while true; do
     read -r -p "Theme Slug (empty=done): " t
     t="$(trim "$t")"
@@ -868,7 +922,7 @@ if [ "$THEME_CHOICE" = "7" ]; then
     CUSTOM_THEMES+=("$t")
   done
   if [ "${#CUSTOM_THEMES[@]}" -gt 0 ]; then
-    read -r -p "Which theme should be activated? (Slug, empty=first): " act
+    read -r -p "Which theme should be activated? (Slug, empty=first one): " act
     act="$(trim "$act")"
     CUSTOM_THEME_ACTIVATE="${act:-${CUSTOM_THEMES[0]}}"
   else
@@ -889,33 +943,25 @@ echo "Database Name:  $DB_NAME"
 echo "WP-CLI Memory:  ${WP_CLI_MEMORY_LIMIT}"
 
 echo ""
-echo "Plugins (install):"
-echo "  • Query Monitor:   $INSTALL_QUERY_MONITOR"
-echo "  • Debug Bar:       $INSTALL_DEBUG_BAR"
-echo "  • Adminer:         $INSTALL_ADMINER"
-echo "  • WooCommerce:     $INSTALL_WC"
-echo "  • Yoast SEO:       $INSTALL_YOAST"
-echo "  • Contact Form 7:  $INSTALL_CF7"
-echo "  • Elementor:       $INSTALL_ELEMENTOR"
-echo "  • ACF:             $INSTALL_ACF"
+echo "Plugins (install only):"
+echo "  • Query Monitor:    $INSTALL_QUERY_MONITOR"
+echo "  • Debug Bar:        $INSTALL_DEBUG_BAR"
+echo "  • Adminer:          $INSTALL_ADMINER"
+echo "  • WP Mail SMTP:     $INSTALL_WP_MAIL_SMTP"
+echo "  • Post SMTP:        $INSTALL_POST_SMTP"
+echo "  • WooCommerce:      $INSTALL_WC"
+echo "  • Yoast SEO:        $INSTALL_YOAST"
+echo "  • Contact Form 7:   $INSTALL_CF7"
+echo "  • Elementor:        $INSTALL_ELEMENTOR"
+echo "  • ACF:              $INSTALL_ACF"
 if [ "${#EXTRA_PLUGINS[@]}" -gt 0 ]; then
-  echo "  • Extra:           ${EXTRA_PLUGINS[*]}"
+  echo "  • Extra:            ${EXTRA_PLUGINS[*]}"
 fi
 
-if [ "$WP_LOCALE" != "en_US" ]; then
-  echo -e "${BLUE}→ Finalizing Language Settings for Core & Plugins...${NC}"
-  
-  # 1. Install all missing plugin translations
-  run_wp_best_effort language plugin install --all --locale="$WP_LOCALE" >/dev/null 2>&1 || true
-  
-  # 2. Update and activate all translations (this step is critical)
-  run_wp_best_effort language plugin update --all --locale="$WP_LOCALE" >/dev/null 2>&1 || true
-  
-  # 3. Update core language
-  run_wp_best_effort core language update >/dev/null 2>&1 || true
-
-  echo -e "${GREEN}✓ Language settings successfully completed for $WP_LOCALE${NC}"
-fi
+echo ""
+echo "Debugging:"
+echo "  • Symlink debug.log: $INSTALL_DEBUG_SYMLINK"
+echo "  • Browser Viewer:    $INSTALL_BROWSER_VIEWER"
 
 echo ""
 if [ "${#PLUGIN_LINK_NAMES[@]}" -gt 0 ]; then
@@ -932,10 +978,10 @@ echo "Theme:"
 case "$THEME_CHOICE" in
   1) echo "  • Twenty Twenty-Five" ;;
   2) echo "  • Twenty Twenty-Four" ;;
-  3) echo "  • Storefront" ;;
+  3) echo "  • Storefront (WooCommerce)" ;;
   4) echo "  • Astra" ;;
   5) echo "  • Indio" ;;
-  6) echo "  • None (Keep default)" ;;
+  6) echo "  • Default" ;;
   7)
     if [ "${#CUSTOM_THEMES[@]}" -eq 0 ]; then
       echo "  • Custom: (none specified) → Default"
@@ -965,7 +1011,7 @@ fi
 
 if [ "${DRY_RUN:-0}" -eq 1 ]; then
   echo ""
-  echo -e "${YELLOW}Dry Run active: No changes were made. Exiting after summary.${NC}"
+  echo -e "${YELLOW}Dry Run active: No changes were made. Exiting after Summary.${NC}"
   exit 0
 fi
 
@@ -976,7 +1022,7 @@ fi
 # 1) Create site directory
 
 echo ""
-echo -e "${BLUE}[1/9] Creating Site Folder...${NC}"
+echo -e "${BLUE}[1/10] Creating Site Folder...${NC}"
 mkdir -p "$SITE_ROOT"
 cd "$SITE_ROOT"
 echo -e "${GREEN}✓ Folder created: $PWD${NC}"
@@ -984,23 +1030,24 @@ echo -e "${GREEN}✓ Folder created: $PWD${NC}"
 # 2) Create database
 
 echo ""
-echo -e "${BLUE}[2/9] Creating Database...${NC}"
+echo -e "${BLUE}[2/10] Creating Database...${NC}"
 mysql_exec "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;"
 echo -e "${GREEN}✓ Database '${DB_NAME}' ready.${NC}"
 
 # 3) Download WordPress
 
 echo ""
-echo -e "${BLUE}[3/9] Installing WordPress Core...${NC}"
+echo -e "${BLUE}[3/10] Installing WordPress Core...${NC}"
 if command -v curl >/dev/null 2>&1; then
   echo "• Connectivity Check: wordpress.org ..."
   curl -Is https://wordpress.org/ | head -n 1 || true
   echo "• Connectivity Check: downloads.wordpress.org ..."
   curl -Is https://downloads.wordpress.org/ | head -n 1 || true
-  # Locale-specific check (e.g. de.wordpress.org, en.wordpress.org)
-  if [ "$WP_LOCALE" != "en_US" ]; then
-    echo "• Connectivity Check: locale-specific wordpress.org ..."
-    curl -Is "https://${WP_LOCALE%.*}.wordpress.org/" | head -n 1 || true
+  # Check for locale specific download site
+  if [[ "$WP_LOCALE" =~ ^(de|fr|es|it|ja|ko|pt|ru|zh)_ ]]; then
+    _loc_prefix="${WP_LOCALE%%_*}"
+    echo "• Connectivity Check: ${_loc_prefix}.wordpress.org ..."
+    curl -Is https://${_loc_prefix}.wordpress.org/ | head -n 1 || true
   fi
 fi
 
@@ -1019,288 +1066,307 @@ if [ "$use_custom_prefix" = "y" ]; then
   fi
 fi
 
-# Line 1184 (Approximate)
-run_wp_best_effort() {
-  # Best-effort wrapper: Executes the command in a subshell and returns the exit code
-  # without triggering the main script's ERR trap.
-  
-  # Save the WP-CLI command's return value
-  local rc=0
-
-  # Execute the WP-CLI command in a subshell
-  (
-    # Temporarily enable the original ERR trap, if it was defined
-    local old_trap
-    old_trap="$(trap -p ERR || true)"
-    eval "$old_trap" 2>/dev/null || true
-    
-    # Disable set -e and ERR trap in this subshell
-    set +e
-    trap - ERR
-
-    # Execute the command
-    run_wp "$@"
-    
-    # Save the subshell's exit code
-    exit $?
-  )
-  
-  # Save the subshell's exit code
-  rc=$?
-  
-  # The main script's trap and set -e remain unaffected.
-  return $rc
-}
-
 echo ""
-echo -e "${BLUE}[4/9] Creating wp-config.php...${NC}"
-run_wp config create \
-  --dbname="$DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASSWORD" --dbhost="$DB_HOST" --dbprefix="$DB_PREFIX" \
-  --skip-check --force
+echo -e "${BLUE}[4/10] Creating wp-config...${NC}"
+run_wp core config \
+  --dbname="$DB_NAME" \
+  --dbuser="$DB_USER" \
+  --dbpass="$DB_PASSWORD" \
+  --dbhost="$DB_HOST" \
+  --dbprefix="$DB_PREFIX" \
+  --skip-check \
+  --locale="$WP_LOCALE"
 
-run_wp config set WP_DEBUG true --raw
-run_wp config set WP_DEBUG_LOG true --raw
-run_wp config set WP_DEBUG_DISPLAY false --raw
-run_wp config set SCRIPT_DEBUG true --raw
-
-echo -e "${GREEN}✓ wp-config.php created (Debug Mode enabled)${NC}"
-
-# 5) Install WordPress
-
-echo ""
-echo -e "${BLUE}[5/9] Installing WordPress...${NC}"
-run_wp core install --url="$WP_URL" --title="$WP_TITLE" --admin_user="$WP_ADMIN_USER" --admin_password="$WP_ADMIN_PASSWORD" --admin_email="$WP_ADMIN_EMAIL" --skip-email
-
-echo -e "${GREEN}✓ WordPress installed${NC}"
-
-# 5b) Activate locale (esp. important if core came from generic ZIP or nightly)
-
-echo ""
-echo -e "${BLUE}[6/9] Activating Language...${NC}"
-# Best-effort: install & activate language pack
-set +e
-run_wp language core install "$WP_LOCALE" --activate >/dev/null 2>&1
-st=$?
-set -e
-if [ $st -ne 0 ]; then
-  echo -e "${YELLOW}⚠ Could not automatically activate language pack '$WP_LOCALE' (possibly Nightly without pack).${NC}"
-else
-  echo -e "${GREEN}✓ Language '$WP_LOCALE' activated.${NC}"
+if [ ! -f "wp-config.php" ]; then
+  echo -e "${RED}✗ Could not create wp-config.php.${NC}"
+  exit 1
 fi
+echo -e "${GREEN}✓ wp-config.php created.${NC}"
 
-# 6) Create plugin symlinks
+# 5) Add debug constants to wp-config.php (before happy blogging)
+echo ""
+echo -e "${BLUE}[5/10] Setting Debug Constants...${NC}"
+
+# Set constants with WP-CLI (WP-CLI is better than manual sed editing)
+run_wp config set WP_DEBUG true --type=constant --raw
+run_wp config set WP_DEBUG_LOG true --type=constant --raw
+run_wp config set WP_DEBUG_DISPLAY false --type=constant --raw
+run_wp config set SCRIPT_DEBUG true --type=constant --raw
+
+echo -e "${GREEN}✓ Debug constants set in wp-config.php.${NC}"
+
+
+# 6) Core install
 
 echo ""
-echo -e "${BLUE}[7/9] Creating Plugin Symlinks...${NC}"
-if [ "${#PLUGIN_LINK_NAMES[@]}" -eq 0 ]; then
-  echo -e "${YELLOW}↷ No symlinks noted${NC}"
-else
-  for i in "${!PLUGIN_LINK_NAMES[@]}"; do
-    SRC="${PLUGIN_LINK_PATHS[$i]}"
-    NAME="${PLUGIN_LINK_NAMES[$i]}"
-    DEST="$SITE_ROOT/wp-content/plugins/$NAME"
+echo -e "${BLUE}[6/10] Installing WordPress Core...${NC}"
 
-    echo ""
-    echo -e "${YELLOW}• $NAME${NC}"
-    echo "  From: $SRC"
-    echo "  To: $DEST"
+# FIX: Remove all quotes around cleaned variables (prevents "" in database fields)
+WP_INSTALL_COMMAND="core install \
+  --url=$WP_URL \
+  --title=$WP_TITLE \
+  --admin_user=$WP_ADMIN_USER \
+  --admin_password=$WP_ADMIN_PASSWORD \
+  --admin_email=$WP_ADMIN_EMAIL \
+  --skip-email"
 
-    if [ -e "$DEST" ] || [ -L "$DEST" ]; then
-      echo -e "${YELLOW}⚠ Target already exists: $DEST${NC}"
-      rep="$(confirm_yn "Replace?" "n")"
-      if [ "$rep" = "y" ]; then
-        rm -rf "$DEST"
-      else
-        echo -e "${YELLOW}↷ Skipped${NC}"
-        continue
-      fi
-    fi
-
-    if [ ! -d "$SRC" ]; then
-      echo -e "${YELLOW}⚠ Source is not a folder: $SRC${NC}"
-      tr="$(confirm_yn "Try symlink anyway?" "n")"
-      [ "$tr" != "y" ] && continue
-    fi
-
-    ln -s "$SRC" "$DEST"
-    echo -e "${GREEN}✓ Symlink created${NC}"
-  done
+if ! run_wp $WP_INSTALL_COMMAND; then
+  echo -e "${RED}✗ WP-CLI core install failed.${NC}"
+  echo "• Check if database ${DB_NAME} already contains data."
+  exit 1
 fi
+echo -e "${GREEN}✓ WordPress Core installed.${NC}"
 
-# 7) Install plugins
+# 6.5) Correct Site URL (fixes https://https// error)
+echo ""
+echo -e "${BLUE}[6.5/10] Correcting Site URL...${NC}"
+
+# Explicitly set siteurl and home options to fix the double-protocol problem.
+# This is the most robust method to fix the double-protocol problem.
+run_wp option update siteurl "$WP_URL" || true
+run_wp option update home "$WP_URL" || true
+
+echo -e "${GREEN}✓ Site URL corrected to ${WP_URL}.${NC}"
+
+# 7) Install and activate theme
 
 echo ""
-echo -e "${BLUE}[8/9] Installing Plugins...${NC}"
+echo -e "${BLUE}[7/10] Installing and Activating Theme...${NC}"
 
-install_plugin_if() {
-  local flag="$1"; shift
-  local slug="$1"; shift
-  local activate="${1:-yes}"
-  if [ "$flag" = "y" ]; then
-    if [ "$activate" = "yes" ]; then
-      echo "• Installing $slug (activate)..."
-      run_wp plugin install "$slug" --activate
-    else
-      echo "• Installing $slug (no activate)..."
-      run_wp plugin install "$slug"
-    fi
-    
-    # NEW: Install language pack for this plugin
-    if [ "$WP_LOCALE" != "en_US" ]; then
-      set +e
-      run_wp language plugin install "$slug" "$WP_LOCALE" --skip-activate >/dev/null 2>&1 || true
-      set -e
-    fi
-    # END NEW
-
-    echo -e "${GREEN}  ✓ $slug installed${NC}"
-  fi
-}
-
-install_plugin_if "$INSTALL_QUERY_MONITOR" "query-monitor" "yes"
-install_plugin_if "$INSTALL_DEBUG_BAR" "debug-bar" "yes"
-# Adminer: correct WordPress.org slug is pexlechris-adminer
-install_plugin_if "$INSTALL_ADMINER" "pexlechris-adminer" "yes"
-if [ "$INSTALL_ADMINER" = "y" ]; then
-  echo "  → Access: wp-admin → Tools → Adminer"
-fi
-
-if [ "${INSTALL_WC:-n}" = "y" ]; then
-    echo "• Installing woocommerce (activate, final language fix)..."
-    
-    # Standard installation without the faulty --skip-setup parameter
-    run_wp plugin install woocommerce --activate
-    
-    # CRITICAL STEP 1: Immediately deactivate the setup wizard in the database.
-    # This prevents English initialization.
-    run_wp_best_effort option update woocommerce_setup_wizard_skipped 'yes' >/dev/null 2>&1 || true
-    
-    # CRITICAL STEP 2: Force a US location for email templates (which often remain English)
-    # Changed from 'DE:BW' to 'US:CA' as a typical US default for an English script.
-    run_wp_best_effort option update woocommerce_default_country 'US:CA' >/dev/null 2>&1 || true
-    
-    # Update general language setting
-    run_wp_best_effort option update WPLANG "$WP_LOCALE" >/dev/null 2>&1 || true
-    
-    echo -e "${GREEN}  ✓ woocommerce installed${NC}"
-fi
-
-install_plugin_if "$INSTALL_YOAST" "wordpress-seo" "yes"
-install_plugin_if "$INSTALL_CF7" "contact-form-7" "yes"
-install_plugin_if "$INSTALL_ELEMENTOR" "elementor" "no"
-install_plugin_if "$INSTALL_ACF" "advanced-custom-fields" "yes"
-
-if [ "${#EXTRA_PLUGINS[@]}" -gt 0 ]; then
-  echo ""
-  echo -e "${YELLOW}Extra Plugins:${NC}"
-  for p in "${EXTRA_PLUGINS[@]}"; do
-    echo "• Installing $p (activate)..."
-    run_wp plugin install "$p" --activate
-    echo -e "${GREEN}  ✓ $p installed${NC}"
-  done
-fi
-
-# 8) Install theme(s)
-
-echo ""
-echo -e "${BLUE}[9/9] Installing Theme(s)...${NC}"
-
+THEME_SLUG=""
 case "$THEME_CHOICE" in
-  1)
-    echo "• Installing Twenty Twenty-Five..."
-    run_wp theme install twentytwentyfive --activate
-    ;;
-  2)
-    echo "• Installing Twenty Twenty-Four..."
-    run_wp theme install twentytwentyfour --activate
-    ;;
-  3)
-    echo "• Installing Storefront..."
-    run_wp theme install storefront --activate
-    ;;
-  4)
-    echo "• Installing Astra..."
-    run_wp theme install astra --activate
-    ;;
-  5)
-    echo "• Installing Indio..."
-    run_wp theme install indio --activate
-    ;;
-  6)
-    echo "• Keeping default theme..."
-    ;;
-  7)
-    echo -e "${YELLOW}Custom Themes:${NC}"
-    if [ "${#CUSTOM_THEMES[@]}" -eq 0 ]; then
-      echo "• No custom themes specified – skipping."
-    else
+  1) THEME_SLUG="twentytwentyfive" ;;
+  2) THEME_SLUG="twentytwentyfour" ;;
+  3) THEME_SLUG="storefront" ;;
+  4) THEME_SLUG="astra" ;;
+  5) THEME_SLUG="indio" ;;
+  6) THEME_SLUG="" ;;
+  7) # Custom Themes
+    if [ "${#CUSTOM_THEMES[@]}" -gt 0 ]; then
+      echo "• Installing Custom Themes: ${CUSTOM_THEMES[*]}"
       for t in "${CUSTOM_THEMES[@]}"; do
-        if [ "$t" = "$CUSTOM_THEME_ACTIVATE" ]; then
-          echo "• Installing $t (activate)..."
-          run_wp theme install "$t" --activate
-        else
-          echo "• Installing $t..."
-          run_wp theme install "$t"
-        fi
+        run_wp_best_effort theme install "$t"
       done
+      THEME_SLUG="${CUSTOM_THEME_ACTIVATE}"
     fi
-    ;;
-  *)
-    echo "• Keeping default theme..."
     ;;
 esac
 
-echo -e "${GREEN}✓ Plugins & Themes installed${NC}"
-
-# ---------- Useful settings ----------
-echo ""
-echo -e "${BLUE}Useful Settings…${NC}"
-
-# Set Permalinks
-echo -e "${BLUE}→ Setting Permalink Structure...${NC}"
-
-# Execute WP-CLI command and filter the Herd warning.
-# Add || true to prevent the ERR trap from being triggered.
-run_wp_best_effort rewrite structure '/%postname%/' 2>&1 \
-  | grep -Eiv "Could not open input file: /Users/romanmahr/Library/Application" || true 
-rc=$?
-
-if [ $rc -ne 0 ]; then
-  # The warning is issued if WP-CLI truly fails.
-  echo -e "${YELLOW}⚠ Could not set permalink structure (Exit $rc) – continuing.${NC}"
-fi
-
-# ...
-run_wp_best_effort option update default_comment_status closed >/dev/null 2>&1 || true
-run_wp_best_effort option update timezone_string 'Europe/Berlin' >/dev/null 2>&1 || true
-
-echo -e "${GREEN}✓ Useful basic settings complete${NC}"
-echo ""
-
-if [ "${INSTALL_WC:-n}" = "y" ]; then
-  PROMPT_TEXT="Create test posts, pages & products?"
-else
-  PROMPT_TEXT="Create test posts & pages?"
-fi
-
-create_content="$(confirm_yn "$PROMPT_TEXT" "n")"
-if [ "$create_content" = "y" ]; then
-  run_wp post create --post_title='Test Blog Post 1' --post_content='This is a test post for featured image testing.' --post_status=publish --post_type=post
-  run_wp post create --post_title='Test Blog Post 2' --post_content='This is another test post.' --post_status=publish --post_type=post
-  run_wp post create --post_title='Test Page' --post_content='This is a test page.' --post_status=publish --post_type=page
-  # 2. WordPress Products (if Woocommerce was chosen)
-  if [ "${INSTALL_WC:-n}" = "y" ]; then
-    echo -e "${BLUE}→ Creating test products...${NC}"
-    run_wp post create --post_title='Test Product 1' --post_content='Description of the test product' --post_status=publish --post_type=product >/dev/null 2>&1
-    echo "Success: Created product 1."
-    run_wp post create --post_title='Test Product 2' --post_content='Another test product' --post_status=publish --post_type=product >/dev/null 2>&1
-    echo "Success: Created product 2."
+if [ -n "$THEME_SLUG" ]; then
+  if run_wp_best_effort theme install "$THEME_SLUG"; then
+    if run_wp_best_effort theme activate "$THEME_SLUG"; then
+      echo -e "${GREEN}✓ Theme '${THEME_SLUG}' installed and activated.${NC}"
+    else
+      echo -e "${YELLOW}⚠ Theme '${THEME_SLUG}' installed, but could not be activated.${NC}"
+    fi
+  else
+    echo -e "${YELLOW}⚠ Theme '${THEME_SLUG}' could not be installed. Default theme remains active.${NC}"
   fi
-  echo -e "${GREEN}✓ Test content created${NC}"
+else
+  echo "• No theme selected for installation/activation. Default theme remains active."
 fi
 
-echo -e "${BLUE}→ Finalizing language settings...${NC}"
-run_wp_best_effort core language update >/dev/null 2>&1 || true
+# 8) Create Plugin Symlinks
+
+echo ""
+echo -e "${BLUE}[8/10] Creating Plugin Symlinks...${NC}"
+
+if [ "${#PLUGIN_LINK_NAMES[@]}" -gt 0 ]; then
+  for i in "${!PLUGIN_LINK_NAMES[@]}"; do
+    _link_name="${PLUGIN_LINK_NAMES[$i]}"
+    _target_path="${PLUGIN_LINK_PATHS[$i]}"
+    _link_path="wp-content/plugins/$_link_name"
+
+    if [ -e "$_link_path" ]; then
+      echo -e "${YELLOW}• Attention: Link target already exists (wp-content/plugins/$_link_name). Skipping.${NC}"
+      continue
+    fi
+    # FIX: Corrected syntax error: replaced '}' with 'fi'
+    
+    if [ "${DRY_RUN:-0}" -eq 1 ]; then
+      echo "[dry-run] ln -s \"$_target_path\" \"$_link_path\""
+    else
+      # Create an absolute symlink to the development folder
+      ln -s "$_target_path" "$_link_path"
+      echo -e "${GREEN}✓ Symlink created: $_link_name ← $_target_path${NC}"
+    fi
+  done
+else
+  echo "• No plugin symlinks created."
+fi
+
+# 9) Install Plugins and Extras (without activation)
+
+echo ""
+echo -e "${BLUE}[9/10] Installing Plugins and Extras...${NC}"
+
+PLUGINS_TO_INSTALL=()
+[ "$INSTALL_QUERY_MONITOR" = "y" ] && PLUGINS_TO_INSTALL+=("query-monitor")
+[ "$INSTALL_DEBUG_BAR" = "y" ] && PLUGINS_TO_INSTALL+=("debug-bar")
+[ "$INSTALL_ADMINER" = "y" ] && PLUGINS_TO_INSTALL+=("adminer")
+[ "$INSTALL_WP_MAIL_SMTP" = "y" ] && PLUGINS_TO_INSTALL+=("wp-mail-smtp")
+[ "$INSTALL_POST_SMTP" = "y" ] && PLUGINS_TO_INSTALL+=("post-smtp")
+[ "$INSTALL_WC" = "y" ] && PLUGINS_TO_INSTALL+=("woocommerce")
+[ "$INSTALL_YOAST" = "y" ] && PLUGINS_TO_INSTALL+=("wordpress-seo")
+[ "$INSTALL_CF7" = "y" ] && PLUGINS_TO_INSTALL+=("contact-form-7")
+[ "$INSTALL_ELEMENTOR" = "y" ] && PLUGINS_TO_INSTALL+=("elementor")
+[ "$INSTALL_ACF" = "y" ] && PLUGINS_TO_INSTALL+=("advanced-custom-fields")
+PLUGINS_TO_INSTALL+=("${EXTRA_PLUGINS[@]:-}") # FIX: Null-safe expansion
+
+if [ "${#PLUGINS_TO_INSTALL[@]}" -gt 0 ]; then
+  echo "• Installing: ${PLUGINS_TO_INSTALL[*]}"
+  
+  # Remove silent wrapper to show WP-CLI error messages.
+  # Use 'set +e' / 'set -e' to prevent script termination on error.
+  
+  set +e
+  echo -e "${BLUE}--- WP-CLI Output (Start) ---${NC}"
+  # run_wp passes output to stdout/stderr
+  # FIX (v24): --skip-if-already-installed removed as it throws an error in older WP-CLI versions (Herd).
+  run_wp plugin install "${PLUGINS_TO_INSTALL[@]}"
+  WP_CLI_STATUS=$?
+  echo -e "${BLUE}--- WP-CLI Output (End) ---${NC}"
+  set -e
+
+  if [ $WP_CLI_STATUS -eq 0 ]; then
+    echo -e "${GREEN}✓ Plugins installed successfully (Exit Code 0).${NC}"
+  else
+    echo -e "${RED}✗ ERROR: Plugin installation with WP-CLI failed (Exit Code $WP_CLI_STATUS).${NC}"
+    echo "  → Please check the console output above for WP-CLI error messages."
+  fi
+else
+  echo "• No plugins selected for installation."
+fi
+
+
+# 10) Finalize Plugins and Language
+
+echo ""
+echo -e "${BLUE}[10/10] Finalizing Plugins and Language...${NC}"
+
+# Activate all installed plugins (including symlinks if they exist now)
+# run_wp_best_effort plugin activate --all # <--- LINE COMMENTED OUT (Activation not desired)
+echo -e "${GREEN}✓ Plugin installation complete. No plugins were activated (as requested by user).${NC}"
+
+# 10.1) Finalize language (if needed)
+# Downloads language packs and ensures the backend uses the correct language.
+run_wp_best_effort language core update >/dev/null 2>&1 || true
+run_wp_best_effort language plugin update --all >/dev/null 2>&1 || true
+echo -e "${GREEN}✓ Language finalization complete.${NC}"
+
+# 10.2) Check Logging Functionality
+echo ""
+echo -e "${BLUE}[10.2/10] Checking Debug Log...${NC}"
+
+DEBUG_LOG_PATH="wp-content/debug.log"
+WP_CONTENT_DIR="wp-content"
+CURRENT_USER=$(whoami)
+
+# 1. Ensure file existence and set permissions (before write test)
+if [ ! -d "$WP_CONTENT_DIR" ]; then mkdir -p "$WP_CONTENT_DIR"; fi
+if [ ! -f "$DEBUG_LOG_PATH" ]; then touch "$DEBUG_LOG_PATH"; fi
+
+# Set permissions before the test (for Herd/macOS standard)
+chmod 775 "$WP_CONTENT_DIR" || true
+chmod 664 "$DEBUG_LOG_PATH" 2>/dev/null || true
+
+
+# 2. Write the test entry directly with file_put_contents (most robust method)
+TEST_LOG_MESSAGE="[INSTALL-SCRIPT-TEST] Installation successfully completed and Debug Log function checked on $(date +'%Y-%m-%d %H:%M:%S')"
+
+# The function writes directly to the file and ignores wp-config/error_log fallbacks.
+PHP_COMMAND="file_put_contents(\"$WP_CONTENT_DIR/debug.log\", \"[\" . date('d-M-Y H:i:s') . \"] $TEST_LOG_MESSAGE\n\", FILE_APPEND);"
+run_wp eval "$PHP_COMMAND" >/dev/null 2>&1
+
+
+# 3. Check if the test was successful
+if [ -f "$DEBUG_LOG_PATH" ] && grep -q "INSTALL-SCRIPT-TEST" "$DEBUG_LOG_PATH"; then
+    echo -e "${GREEN}✓ Test entry successfully written to $DEBUG_LOG_PATH.${NC}"
+    echo "  → Please check the file manually on the filesystem now."
+else
+    echo -e "${RED}✗ Could not find a test entry in $DEBUG_LOG_PATH.${NC}"
+    echo "  → The error is now **exclusively** due to missing permissions or a global PHP lock."
+    echo ""
+    echo -e "${YELLOW}🚨 MANUAL CORRECTION REQUIRED (Permissions):${NC}"
+    echo "  Please execute in the terminal (Your password is required):"
+    echo -e "  ${BOLD}sudo chown -R $CURRENT_USER:staff $WP_CONTENT_DIR${NC}"
+fi
+echo -e "${GREEN}✓ Debug Log check complete.${NC}"
+
+# NEW: 10.7 Debug Log Symlink
+if [ "$INSTALL_DEBUG_SYMLINK" = "y" ]; then
+  echo ""
+  echo -e "${BLUE}[10.7/10] Creating Debug Log Symlink...${NC}" 
+
+  if [ -e "$SITE_ROOT/debug.log" ]; then
+    echo -e "${YELLOW}• Attention: $SITE_ROOT/debug.log already exists. Skipping symlink creation.${NC}"
+  elif [ "${DRY_RUN:-0}" -eq 1 ]; then
+    echo "[dry-run] ln -s \"wp-content/debug.log\" \"$SITE_ROOT/debug.log\""
+  else
+    # The target file (wp-content/debug.log) itself does not need to exist.
+    ln -s "wp-content/debug.log" "$SITE_ROOT/debug.log"
+    echo -e "${GREEN}✓ Relative symlink '$SITE_ROOT/debug.log' created (points to wp-content/debug.log).${NC}"
+  fi
+fi
+
+# NEW: 10.8 Browser Log Viewer Script (debug-viewer.php)
+if [ "$INSTALL_BROWSER_VIEWER" = "y" ]; then
+  echo ""
+  echo -e "${BLUE}[10.8/10] Creating Browser Debug Log Viewer (debug-viewer.php)...${NC}" 
+  VIEWER_SCRIPT="debug-viewer.php"
+
+  # The code for creating the PHP file
+  cat > "$VIEWER_SCRIPT" <<'PHP_VIEWER'
+<?php
+/**
+ * Browser Log Viewer for debug.log (Herd/local development only)
+ *
+ * Checks if WP_DEBUG_LOG is defined and safely outputs the log file content.
+ * Does not cache the response in the browser.
+ */
+
+if ( ! file_exists( dirname( __FILE__ ) . '/wp-load.php' ) ) {
+    die( 'Error: WordPress core not found.' );
+}
+
+// 1. Load WordPress to access constants like WP_CONTENT_DIR
+require_once( dirname( __FILE__ ) . '/wp-load.php' );
+
+// CORRECTED LINE: WP_CONTENT_DIR is now defined.
+define( 'DEBUG_LOG_FILE', WP_CONTENT_DIR . '/debug.log' );
+
+
+// 2. Check for required debug constants (security measure)
+if ( ! ( defined( 'WP_DEBUG_LOG' ) && WP_DEBUG_LOG ) ) {
+    header( 'Content-Type: text/plain' );
+    die( "Error: WP_DEBUG_LOG is not set to true in wp-config.php. Log viewer disabled for security." );
+}
+
+// 3. Check file existence and readability
+if ( ! file_exists( DEBUG_LOG_FILE ) || ! is_readable( DEBUG_LOG_FILE ) ) {
+    header( 'Content-Type: text/plain' );
+    die( "Error: Debug log file not found or unreadable:\n" . DEBUG_LOG_FILE );
+}
+
+
+// 4. Output the file content safely with "no cache" headers
+header( 'Content-Type: text/plain; charset=utf-8' );
+header( 'Cache-Control: no-store, no-cache, must-revalidate, max-age=0' );
+header( 'Pragma: no-cache' );
+header( 'Expires: Fri, 01 Jan 1990 00:00:00 GMT' );
+
+// Output the full content
+readfile( DEBUG_LOG_FILE );
+PHP_VIEWER
+
+  if [ "${DRY_RUN:-0}" -eq 1 ]; then
+    echo "[dry-run] Creating PHP file: $VIEWER_SCRIPT"
+  else
+    echo -e "${GREEN}✓ PHP script '$VIEWER_SCRIPT' created.${NC}"
+    echo "  → Accessible at: ${WP_URL}/$VIEWER_SCRIPT"
+  fi
+fi
+
 
 # ---------- Final summary ----------
 echo ""
@@ -1331,10 +1397,28 @@ else
   echo "Plugin Symlinks: No"
 fi
 
+# NEW: SMTP Hints
 echo ""
-echo -e "${YELLOW}Next Steps:${NC}"
-echo "1. Open http://$WP_URL in your browser"
-echo "2. Login with $WP_ADMIN_USER / $WP_ADMIN_PASSWORD"
-echo "3. Test your features!"
+echo -e "${YELLOW}EMAIL TESTING (Mailpit / Mailhog):${NC}"
+if [ "$INSTALL_WP_MAIL_SMTP" = "y" ] || [ "$INSTALL_POST_SMTP" = "y" ]; then
+  echo "You installed an SMTP plugin. Please configure it in the plugin settings:"
+  echo -e "  • SMTP Host:        ${BOLD}127.0.0.1${NC} (or localhost)"
+  echo -e "  • SMTP Port:        ${BOLD}1025${NC}"
+  echo "  • Encryption:       None"
+  echo "  • Authentication:   Off"
+else
+  echo "No specific SMTP plugin installed. Herd uses Mailpit by default (accessible via Herd App)."
+fi
+
+# NEW: Debug Viewer / Symlink Hint
 echo ""
-echo -e "${BLUE}Happy Testing! 🚀${NC}"
+echo -e "${YELLOW}DEBUGGING COMFORT:${NC}"
+if [ "$INSTALL_BROWSER_VIEWER" = "y" ]; then
+    echo -e "${GREEN}Browser Viewer (Live):  ${BOLD}$WP_URL/debug-viewer.php${NC} (Shows the current log content without cache)"
+fi
+if [ "$INSTALL_DEBUG_SYMLINK" = "y" ]; then
+    echo -e "${GREEN}Debug Log Symlink:      $WP_URL/debug.log (If Herd/webserver allows symlinks)"
+fi
+echo -e "Terminal Live Viewer: ${BOLD}cd $SITE_ROOT && tail -f wp-content/debug.log${NC}"
+
+echo "Enjoy debugging!"

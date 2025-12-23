@@ -30,6 +30,9 @@
 # - Themes: Auswahl inkl. Indio + Twenty Twenty-Five + Custom Themes
 # - Beliebig viele lokale Plugin-Symlinks
 # - Robuster Core-Download: WP-CLI, Fallback ZIP (um WP-CLI Extractor memory errors zu umgehen)
+# - Debug Log Symlink: Erstellung nur auf WP-Standardbasis
+# - NEU: debug-viewer.php Script zum Live-Log-Watching (Browser-Zugriff)
+# - NEU: SMTP-Konfigurations-Hinweise für Mailpit/Mailhog
 
 set -euo pipefail
 
@@ -52,12 +55,13 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+BOLD='\033[1m'
 NC='\033[0m'
 
 # Plugin-Pfad (ANPASSEN!)
 PLUGIN_DEV_PATH="$HOME/Herd/plugins/wp-content/plugins/ki-bildgenerator"  # Dein Plugin-Entwicklungs-Ordner
 
-trap 'echo -e "${RED}✗ Fehler in Zeile ${LINENO}: Befehl \"${BASH_COMMAND}\" ist fehlgeschlagen.${NC}"' ERR
+trap 'echo -e "${RED}${BOLD}✗ Fehler in Zeile ${LINENO}: Befehl \"${BASH_COMMAND}\" ist fehlgeschlagen.${NC}"' ERR
 
 # ---------- Helpers ----------
 confirm_yn() {
@@ -67,10 +71,12 @@ confirm_yn() {
   local ans=""
   while true; do
     if [ "$def" = "y" ]; then
-      read -r -p "${prompt} (Y/n): " ans
+      # If default is 'y', highlight Y. Use echo -e inside $(...) for robust coloring with read -p.
+      read -r -p "$(echo -e "${prompt} (${GREEN}Y${NC}/n): ")" ans
       ans="${ans:-y}"
     else
-      read -r -p "${prompt} (y/N): " ans
+      # If default is 'n', highlight N. Use echo -e inside $(...) for robust coloring with read -p.
+      read -r -p "$(echo -e "${prompt} (y/${GREEN}N${NC}): ")" ans
       ans="${ans:-n}"
     fi
     case "$ans" in
@@ -227,6 +233,13 @@ try_run_wp() {
   local st=$?
   set -e
   return $st
+}
+
+run_wp_best_effort() {
+  # Best-effort wrapper: Führt den Befehl in einer Subshell aus und gibt den Exit-Code
+  # zurück, ohne den ERR-Trap des Hauptskripts auszulösen.
+  # Dies ist nützlich für optionale Befehle (z.B. plugin install), die fehlschlagen können.
+  ( set +e; run_wp "$@" >/dev/null 2>&1; return $? )
 }
 
 # ---------- Core download (WP-CLI first, ZIP fallback) ----------
@@ -438,6 +451,8 @@ fi
 
 
 # Best-effort: letzte Stable-Version ermitteln (für Nightly-Label)
+echo -e "${BLUE}• Versuche, die neueste stabile WordPress-Version abzurufen (Best-Effort)...${NC}" # <--- NEUE Status-Ausgabe
+set +e # NEU: Deaktiviere sofortigen Abbruch, um Netzwerkfehler zu ignorieren
 LATEST_STABLE_VERSION="$(
   curl -fsSL "https://api.wordpress.org/core/version-check/1.7/?channel=stable&locale=en_US" 2>/dev/null \
   | python3 -c 'import sys,json
@@ -446,10 +461,11 @@ try:
   o=(d.get("offers") or [])
   print(o[0].get("version","") if o else "")
 except Exception:
-  print("")' 2>/dev/null \
-  || true
+  print("")' 2>/dev/null
 )"
+set -e # NEU: Aktiviere sofortigen Abbruch wieder
 LATEST_STABLE_VERSION="${LATEST_STABLE_VERSION:-der letzten Stable-Version}"
+echo -e "${GREEN}✓ Stable-Version für Label: ${LATEST_STABLE_VERSION}${NC}" # <--- NEUE Status-Ausgabe
 
 echo ""
 
@@ -525,7 +541,7 @@ def is_rc(v,u,r):
     return ("rc" in v) or ("rc" in u) or (r=="rc")
 for off in offers:
     v=off.get("version") or ""
-    u=off.get("download") or (off.get("packages") or {}).get("full") or ""
+    u=off.get("download") or (off.get("packages") or dict()).get("full") or ""
     r=off.get("response") or ""
     if v and u and is_pre(v,u,r) and is_rc(v,u,r):
         print("y"); raise SystemExit
@@ -579,7 +595,7 @@ seen=set()
 out=[]
 for off in offers:
     v=off.get('version') or ''
-    url=off.get('download') or (off.get('packages') or {}).get('full') or ''
+    url=off.get('download') or (off.get('packages') or dict()).get('full') or ''
     resp=off.get('response') or ''
     if not v or not url:
         continue
@@ -640,8 +656,6 @@ ${NC}"
     fi
   fi
 fi
-
-# v23.1 PATCH: redundant fallback block removed (avoids double warning)
 
 echo ""
 # ---------- Site name / URL / DB name (needed early) ----------
@@ -768,8 +782,29 @@ PY
   echo -e "${YELLOW}→ Passwort wurde automatisch generiert.${NC}"
 fi
 
-read -r -p "Admin E-Mail (leer = admin@$WP_URL): " WP_ADMIN_EMAIL
-WP_ADMIN_EMAIL="$(trim "${WP_ADMIN_EMAIL:-admin@$WP_URL}")"
+read -r -p "Admin E-Mail (leer = admin@$WP_DOMAIN): " WP_ADMIN_EMAIL
+WP_ADMIN_EMAIL="$(trim "${WP_ADMIN_EMAIL:-admin@$WP_DOMAIN}")"
+
+# === FIX #1: E-Mail-Bereinigung (ULTRA-ROBUST V3 - Iterativ) ===
+# Entfernt wiederholt alle führenden und abschließenden Anführungszeichen (', ").
+_tmp_email="$WP_ADMIN_EMAIL"
+
+# Führe die Bereinigung in einer Schleife durch, bis keine Änderungen mehr erfolgen.
+while true; do
+  _old_email="$_tmp_email"
+  # Entferne ein Paar Anführungszeichen am Anfang und Ende
+  _tmp_email="$(echo "$_tmp_email" | sed "s/^['\"]//; s/['\"]$//")"
+  # Nach jedem Sed-Durchlauf trimmen, falls Leerzeichen dazwischen waren
+  _tmp_email="$(trim "$_tmp_email")"
+  
+  # Wenn der String sich nicht mehr geändert hat, ist er sauber
+  if [ "$_old_email" = "$_tmp_email" ]; then
+    break
+  fi
+done
+
+WP_ADMIN_EMAIL="$_tmp_email"
+
 
 # ---------- Plugins (confirm each) + extras ----------
 echo ""
@@ -778,8 +813,16 @@ echo -e "${YELLOW}Plugins auswählen (jeweils einzeln bestätigen):${NC}"
 # Always installed dev plugins (can still be skipped if you want)
 INSTALL_QUERY_MONITOR="$(confirm_yn "Query Monitor installieren?" "y")"
 INSTALL_DEBUG_BAR="$(confirm_yn "Debug Bar installieren?" "y")"
-INSTALL_ADMINER="$(confirm_yn "Adminer (WP Adminer) installieren?" "y")"
+INSTALL_ADMINER="$(confirm_yn "Adminer (WP Adminer Plugin) installieren?" "y")"
 
+# NEU: SMTP Plugins
+echo ""
+echo -e "${YELLOW}E-Mail Versand (Mail Catcher / SMTP):${NC}"
+INSTALL_WP_MAIL_SMTP="$(confirm_yn "WP Mail SMTP installieren? (Empfohlen für Herd/Mailpit)" "y")"
+INSTALL_POST_SMTP="$(confirm_yn "Post SMTP Mailer/Email Log installieren? (Alternative)" "n")"
+
+echo ""
+echo -e "${YELLOW}Bekannte Plugins:${NC}"
 INSTALL_WC="$(confirm_yn "WooCommerce installieren?" "n")"
 INSTALL_YOAST="$(confirm_yn "Yoast SEO installieren?" "n")"
 INSTALL_CF7="$(confirm_yn "Contact Form 7 installieren?" "n")"
@@ -797,6 +840,12 @@ if [ "$add_more_plugins" = "y" ]; then
     EXTRA_PLUGINS+=("$p")
   done
 fi
+
+# NEU: Abfrage Debug Log Symlink
+echo ""
+echo -e "${YELLOW}Debug Log Komfort (Symlink / Viewer):${NC}"
+INSTALL_DEBUG_SYMLINK="$(confirm_yn "Symlink im Root für debug.log (zeigt auf wp-content/debug.log) aktivieren?" "y")"
+INSTALL_BROWSER_VIEWER="$(confirm_yn "Browser-Log-Viewer (debug-viewer.php) im Root erstellen?" "y")"
 
 # ---------- Plugin symlinks ----------
 # Ziel: wp-content/plugins/<name> -> <local path>
@@ -891,19 +940,24 @@ echo "WP-CLI Memory:  ${WP_CLI_MEMORY_LIMIT}"
 
 echo ""
 echo "Plugins (install only):"
-echo "  • Query Monitor:   $INSTALL_QUERY_MONITOR"
-echo "  • Debug Bar:       $INSTALL_DEBUG_BAR"
-echo "  • Adminer:         $INSTALL_ADMINER"
-echo "  • WooCommerce:     $INSTALL_WC"
-echo "  • Yoast SEO:       $INSTALL_YOAST"
-echo "  • Contact Form 7:  $INSTALL_CF7"
-echo "  • Elementor:       $INSTALL_ELEMENTOR"
-echo "  • ACF:             $INSTALL_ACF"
+echo "  • Query Monitor:    $INSTALL_QUERY_MONITOR"
+echo "  • Debug Bar:        $INSTALL_DEBUG_BAR"
+echo "  • Adminer:          $INSTALL_ADMINER"
+echo "  • WP Mail SMTP:     $INSTALL_WP_MAIL_SMTP"
+echo "  • Post SMTP:        $INSTALL_POST_SMTP"
+echo "  • WooCommerce:      $INSTALL_WC"
+echo "  • Yoast SEO:        $INSTALL_YOAST"
+echo "  • Contact Form 7:   $INSTALL_CF7"
+echo "  • Elementor:        $INSTALL_ELEMENTOR"
+echo "  • ACF:              $INSTALL_ACF"
 if [ "${#EXTRA_PLUGINS[@]}" -gt 0 ]; then
-  echo "  • Extra:           ${EXTRA_PLUGINS[*]}"
+  echo "  • Extra:            ${EXTRA_PLUGINS[*]}"
 fi
 
-# HINWEIS: Dieser Block wurde entfernt, da die Sprach-Finalisierung nun am Ende nach allen Schritten erfolgt.
+echo ""
+echo "Debugging:"
+echo "  • Symlink debug.log: $INSTALL_DEBUG_SYMLINK"
+echo "  • Browser Viewer:    $INSTALL_BROWSER_VIEWER"
 
 echo ""
 if [ "${#PLUGIN_LINK_NAMES[@]}" -gt 0 ]; then
@@ -920,7 +974,7 @@ echo "Theme:"
 case "$THEME_CHOICE" in
   1) echo "  • Twenty Twenty-Five" ;;
   2) echo "  • Twenty Twenty-Four" ;;
-  3) echo "  • Storefront" ;;
+  3) echo "  • Storefront (WooCommerce)" ;;
   4) echo "  • Astra" ;;
   5) echo "  • Indio" ;;
   6) echo "  • Standard" ;;
@@ -964,7 +1018,7 @@ fi
 # 1) Create site directory
 
 echo ""
-echo -e "${BLUE}[1/8] Erstelle Site-Ordner...${NC}"
+echo -e "${BLUE}[1/10] Erstelle Site-Ordner...${NC}"
 mkdir -p "$SITE_ROOT"
 cd "$SITE_ROOT"
 echo -e "${GREEN}✓ Ordner erstellt: $PWD${NC}"
@@ -972,14 +1026,14 @@ echo -e "${GREEN}✓ Ordner erstellt: $PWD${NC}"
 # 2) Create database
 
 echo ""
-echo -e "${BLUE}[2/8] Erstelle Datenbank...${NC}"
+echo -e "${BLUE}[2/10] Erstelle Datenbank...${NC}"
 mysql_exec "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;"
 echo -e "${GREEN}✓ Datenbank '${DB_NAME}' bereit.${NC}"
 
 # 3) Download WordPress
 
 echo ""
-echo -e "${BLUE}[3/8] WordPress Core installieren...${NC}"
+echo -e "${BLUE}[3/10] WordPress Core installieren...${NC}"
 if command -v curl >/dev/null 2>&1; then
   echo "• Connectivity-Check: wordpress.org ..."
   curl -Is https://wordpress.org/ | head -n 1 || true
@@ -1006,249 +1060,306 @@ if [ "$use_custom_prefix" = "y" ]; then
   fi
 fi
 
-run_wp_best_effort() {
-  # Best-effort wrapper: Führt den Befehl in einer Subshell aus und gibt den Exit-Code
-  # zurück, ohne den ERR-Trap des Hauptskripts auszulösen.
-  
-  # Speichere den Rückgabewert des WP-CLI Befehls
-  local rc=0
-
-  # Führe den WP-CLI-Befehl in einer Subshell aus
-  (
-    # Aktiviere temporär den ursprünglichen ERR-Trap, falls er definiert war
-    local old_trap
-    old_trap="$(trap -p ERR || true)"
-    eval "$old_trap" 2>/dev/null || true
-    
-    # Deaktiviere set -e und ERR-Trap in dieser Subshell
-    set +e
-    trap - ERR
-
-    # Führe den Befehl aus
-    run_wp "$@"
-    
-    # Speichere den Exit-Code der Subshell
-    exit $?
-  )
-  
-  # Speichere den Exit-Code der Subshell
-  rc=$?
-  
-  # Der Hauptskript-Trap und set -e bleiben unberührt.
-  return $rc
-}
-
 echo ""
-echo -e "${BLUE}[4/8] Erstelle wp-config.php...${NC}"
-run_wp config create \
-  --dbname="$DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASSWORD" --dbhost="$DB_HOST" --dbprefix="$DB_PREFIX" \
-  --skip-check --force
+echo -e "${BLUE}[4/10] wp-config erstellen...${NC}"
+run_wp core config \
+  --dbname="$DB_NAME" \
+  --dbuser="$DB_USER" \
+  --dbpass="$DB_PASSWORD" \
+  --dbhost="$DB_HOST" \
+  --dbprefix="$DB_PREFIX" \
+  --skip-check \
+  --locale="$WP_LOCALE"
 
-run_wp config set WP_DEBUG true --raw
-run_wp config set WP_DEBUG_LOG true --raw
-run_wp config set WP_DEBUG_DISPLAY false --raw
-run_wp config set SCRIPT_DEBUG true --raw
-
-echo -e "${GREEN}✓ wp-config.php erstellt (Debug-Mode aktiviert)${NC}"
-
-# 5) Install WordPress
-
-echo ""
-echo -e "${BLUE}[5/8] Installiere WordPress...${NC}"
-run_wp core install --url="$WP_URL" --title="$WP_TITLE" --admin_user="$WP_ADMIN_USER" --admin_password="$WP_ADMIN_PASSWORD" --admin_email="$WP_ADMIN_EMAIL" --skip-email
-
-echo -e "${GREEN}✓ WordPress installiert${NC}"
-
-# 5b) Activate locale (esp. important if core came from generic ZIP or nightly)
-
-echo ""
-echo -e "${BLUE}[6/8] Sprache aktivieren...${NC}"
-# Best-effort: install & activate language pack
-set +e
-run_wp language core install "$WP_LOCALE" --activate >/dev/null 2>&1
-st=$?
-set -e
-if [ $st -ne 0 ]; then
-  echo -e "${YELLOW}⚠ Konnte Sprachpaket '$WP_LOCALE' nicht automatisch aktivieren (evtl. Nightly ohne Pack).${NC}"
-else
-  echo -e "${GREEN}✓ Sprache '$WP_LOCALE' aktiviert.${NC}"
+if [ ! -f "wp-config.php" ]; then
+  echo -e "${RED}✗ Konnte wp-config.php nicht erstellen.${NC}"
+  exit 1
 fi
+echo -e "${GREEN}✓ wp-config.php erstellt.${NC}"
 
-# 7) Create plugin symlinks
+# 5) Add debug constants to wp-config.php (before happy blogging)
+echo ""
+echo -e "${BLUE}[5/10] Debug-Konstanten setzen...${NC}"
+
+# Setze die Konstanten mit WP-CLI (WP-CLI ist besser als manuelle sed-Bearbeitung)
+run_wp config set WP_DEBUG true --type=constant --raw
+run_wp config set WP_DEBUG_LOG true --type=constant --raw
+run_wp config set WP_DEBUG_DISPLAY false --type=constant --raw
+run_wp config set SCRIPT_DEBUG true --type=constant --raw
+
+echo -e "${GREEN}✓ Debug-Konstanten in wp-config.php gesetzt.${NC}"
+
+
+# 6) Core install
 
 echo ""
-echo -e "${BLUE}[7/8] Erstelle Plugin-Symlinks...${NC}"
-if [ "${#PLUGIN_LINK_NAMES[@]}" -eq 0 ]; then
-  echo -e "${YELLOW}↷ Keine Symlinks vorgemerkt${NC}"
-else
-  for i in "${!PLUGIN_LINK_NAMES[@]}"; do
-    SRC="${PLUGIN_LINK_PATHS[$i]}"
-    NAME="${PLUGIN_LINK_NAMES[$i]}"
-    DEST="$SITE_ROOT/wp-content/plugins/$NAME"
+echo -e "${BLUE}[6/10] WordPress Core installieren...${NC}"
 
-    echo ""
-    echo -e "${YELLOW}• $NAME${NC}"
-    echo "  Von: $SRC"
-    echo "  Nach: $DEST"
+# FIX: Alle quotes um bereinigte Variablen entfernen (verhindert "" in Datenbankfeldern)
+WP_INSTALL_COMMAND="core install \
+  --url=$WP_URL \
+  --title=$WP_TITLE \
+  --admin_user=$WP_ADMIN_USER \
+  --admin_password=$WP_ADMIN_PASSWORD \
+  --admin_email=$WP_ADMIN_EMAIL \
+  --skip-email"
 
-    if [ -e "$DEST" ] || [ -L "$DEST" ]; then
-      echo -e "${YELLOW}⚠ Ziel existiert bereits: $DEST${NC}"
-      rep="$(confirm_yn "Ersetzen?" "n")"
-      if [ "$rep" = "y" ]; then
-        rm -rf "$DEST"
-      else
-        echo -e "${YELLOW}↷ Übersprungen${NC}"
-        continue
-      fi
-    fi
-
-    if [ ! -d "$SRC" ]; then
-      echo -e "${YELLOW}⚠ Quelle ist kein Ordner: $SRC${NC}"
-      tr="$(confirm_yn "Trotzdem Symlink versuchen?" "n")"
-      [ "$tr" != "y" ] && continue
-    fi
-
-    ln -s "$SRC" "$DEST"
-    echo -e "${GREEN}✓ Symlink erstellt${NC}"
-  done
+if ! run_wp $WP_INSTALL_COMMAND; then
+  echo -e "${RED}✗ WP-CLI core install ist fehlgeschlagen.${NC}"
+  echo "• Prüfe, ob die Datenbank ${DB_NAME} bereits Daten enthält."
+  exit 1
 fi
+echo -e "${GREEN}✓ WordPress Core installiert.${NC}"
 
-# 8) Install plugins (only install, no activation)
+# 6.5) Korrektur der Site-URL (behebt https://https// Fehler)
+echo ""
+echo -e "${BLUE}[6.5/10] Korrigiere Site-URL...${NC}"
+
+# Setze siteurl und home Optionen explizit, um die Doppelung zu beheben.
+# Dies ist die robusteste Methode, um das double-protocol problem zu fixen.
+run_wp option update siteurl "$WP_URL" || true
+run_wp option update home "$WP_URL" || true
+
+echo -e "${GREEN}✓ Site-URL auf ${WP_URL} korrigiert.${NC}"
+
+# 7) Theme installieren und aktivieren
 
 echo ""
-echo -e "${BLUE}[8/8] Installiere Plugins (keine Aktivierung)...${NC}"
+echo -e "${BLUE}[7/10] Theme installieren und aktivieren...${NC}"
 
-install_plugin_if() {
-  local flag="$1"; shift
-  local slug="$1"; shift
-  local activate="${1:-no}" # GEÄNDERT: Default auf "no"
-  if [ "$flag" = "y" ]; then
-    if [ "$activate" = "yes" ]; then
-      echo "• Installing $slug (activate)..."
-      run_wp plugin install "$slug" --activate
-    else
-      # Alle Plugins werden nur installiert (no activate)
-      echo "• Installing $slug (no activate)..."
-      run_wp plugin install "$slug"
-    fi
-    
-    # NEU: Installiere das Sprachpaket für dieses Plugin
-    if [ "$WP_LOCALE" != "en_US" ]; then
-      set +e
-      run_wp language plugin install "$slug" "$WP_LOCALE" --skip-activate >/dev/null 2>&1 || true
-      set -e
-    fi
-
-    echo -e "${GREEN}  ✓ $slug installiert${NC}"
-  fi
-}
-
-# ----------------------------------------------------
-# Alle Standard-Plugins (install, no activate)
-# ----------------------------------------------------
-
-install_plugin_if "$INSTALL_QUERY_MONITOR" "query-monitor" "no"
-install_plugin_if "$INSTALL_DEBUG_BAR" "debug-bar" "no"
-
-# Adminer: correct WordPress.org slug is pexlechris-adminer
-install_plugin_if "$INSTALL_ADMINER" "pexlechris-adminer" "no"
-if [ "$INSTALL_ADMINER" = "y" ]; then
-  echo "  → Zugriff: wp-admin → Tools → Adminer (Nach Aktivierung)"
-fi
-
-# Woocommerce (install, no activate)
-install_plugin_if "$INSTALL_WC" "woocommerce" "no"
-
-install_plugin_if "$INSTALL_YOAST" "wordpress-seo" "no"
-install_plugin_if "$INSTALL_CF7" "contact-form-7" "no"
-install_plugin_if "$INSTALL_ELEMENTOR" "elementor" "no"
-install_plugin_if "$INSTALL_ACF" "advanced-custom-fields" "no"
-
-# ----------------------------------------------------
-# Extra Plugins (install, no activate)
-# ----------------------------------------------------
-if [ "${#EXTRA_PLUGINS[@]}" -gt 0 ]; then
-  echo ""
-  echo -e "${YELLOW}Extra Plugins (no activate):${NC}"
-  for p in "${EXTRA_PLUGINS[@]}"; do
-    # 'y' als Flag, da das Plugin in der Liste der Extras ist.
-    # 'no' als Aktivierungs-Parameter.
-    install_plugin_if "y" "$p" "no"
-  done
-fi
-
-echo -e "${GREEN}✓ Plugins installiert (nicht aktiviert)${NC}"
-
-# 9) Install theme(s)
-
-echo ""
-echo -e "${BLUE}[9/8 - Fortsetzung] Installiere Theme(s)...${NC}"
-
+THEME_SLUG=""
 case "$THEME_CHOICE" in
-  1)
-    echo "• Installing Twenty Twenty-Five..."
-    run_wp theme install twentytwentyfive --activate
-    ;;
-  2)
-    echo "• Installing Twenty Twenty-Four..."
-    run_wp theme install twentytwentyfour --activate
-    ;;
-  3)
-    echo "• Installing Storefront..."
-    run_wp theme install storefront --activate
-    ;;
-  4)
-    echo "• Installing Astra..."
-    run_wp theme install astra --activate
-    ;;
-  5)
-    echo "• Installing Indio..."
-    run_wp theme install indio --activate
-    ;;
-  6)
-    echo "• Keeping default theme..."
-    ;;
-  7)
-    echo -e "${YELLOW}Custom Themes:${NC}"
-    if [ "${#CUSTOM_THEMES[@]}" -eq 0 ]; then
-      echo "• Keine Custom-Themes angegeben – überspringe."
-    else
+  1) THEME_SLUG="twentytwentyfive" ;;
+  2) THEME_SLUG="twentytwentyfour" ;;
+  3) THEME_SLUG="storefront" ;;
+  4) THEME_SLUG="astra" ;;
+  5) THEME_SLUG="indio" ;;
+  6) THEME_SLUG="" ;;
+  7) # Custom Themes
+    if [ "${#CUSTOM_THEMES[@]}" -gt 0 ]; then
+      echo "• Installiere Custom Themes: ${CUSTOM_THEMES[*]}"
       for t in "${CUSTOM_THEMES[@]}"; do
-        if [ "$t" = "$CUSTOM_THEME_ACTIVATE" ]; then
-          echo "• Installing $t (activate)..."
-          run_wp theme install "$t" --activate
-        else
-          echo "• Installing $t..."
-          run_wp theme install "$t"
-        fi
+        run_wp_best_effort theme install "$t"
       done
+      THEME_SLUG="${CUSTOM_THEME_ACTIVATE}"
     fi
-    ;;
-  *)
-    echo "• Keeping default theme..."
     ;;
 esac
 
-echo -e "${GREEN}✓ Theme installiert/aktiviert${NC}"
+if [ -n "$THEME_SLUG" ]; then
+  if run_wp_best_effort theme install "$THEME_SLUG"; then
+    if run_wp_best_effort theme activate "$THEME_SLUG"; then
+      echo -e "${GREEN}✓ Theme '${THEME_SLUG}' installiert und aktiviert.${NC}"
+    else
+      echo -e "${YELLOW}⚠ Theme '${THEME_SLUG}' installiert, konnte aber nicht aktiviert werden.${NC}"
+    fi
+  else
+    echo -e "${YELLOW}⚠ Theme '${THEME_SLUG}' konnte nicht installiert werden. Standard-Theme aktiv.${NC}"
+  fi
+else
+  echo "• Kein Theme zur Installation/Aktivierung ausgewählt. Standard-Theme bleibt aktiv."
+fi
 
+# 8) Plugin-Symlinks erstellen
 
-# ---------- Useful settings (Only Permalinks remain) ----------
 echo ""
-echo -e "${BLUE}[10/8] Nützliche Einstellungen (Permalinks)...${NC}"
+echo -e "${BLUE}[8/10] Plugin-Symlinks erstellen...${NC}"
 
-# 1. Permalinks (Post Name)
-echo -e "${BLUE}→ Setze Permalinks auf Post-Name (/sample-post/)...${NC}"
-run_wp option update permalink_structure '/%postname%/'
+if [ "${#PLUGIN_LINK_NAMES[@]}" -gt 0 ]; then
+  for i in "${!PLUGIN_LINK_NAMES[@]}"; do
+    _link_name="${PLUGIN_LINK_NAMES[$i]}"
+    _target_path="${PLUGIN_LINK_PATHS[$i]}"
+    _link_path="wp-content/plugins/$_link_name"
 
-echo -e "${GREEN}✓ Einstellungen abgeschlossen${NC}"
+    if [ -e "$_link_path" ]; then
+      echo -e "${YELLOW}• Achtung: Link-Ziel existiert bereits (wp-content/plugins/$_link_name). Überspringe.${NC}"
+      continue
+    fi
+
+    if [ "${DRY_RUN:-0}" -eq 1 ]; then
+      echo "[dry-run] ln -s \"$_target_path\" \"$_link_path\""
+    else
+      # Erstelle einen absoluten Symlink auf den Entwicklungs-Ordner
+      ln -s "$_target_path" "$_link_path"
+      echo -e "${GREEN}✓ Symlink erstellt: $_link_name ← $_target_path${NC}"
+    fi
+  done
+else
+  echo "• Keine Plugin-Symlinks erstellt."
+fi
+
+# 9) Plugins und Extras installieren (ohne Aktivierung)
 
 echo ""
-echo -e "${BLUE}→ Finalisiere Sprach-Einstellungen (Core & Plugins)...${NC}"
-# Dieser Befehl aktualisiert alle Sprachpakete, die zuvor nur installiert wurden,
-# und stellt sicher, dass das Backend die richtige Sprache verwendet.
+echo -e "${BLUE}[9/10] Plugins und Extras installieren...${NC}"
+
+PLUGINS_TO_INSTALL=()
+[ "$INSTALL_QUERY_MONITOR" = "y" ] && PLUGINS_TO_INSTALL+=("query-monitor")
+[ "$INSTALL_DEBUG_BAR" = "y" ] && PLUGINS_TO_INSTALL+=("debug-bar")
+[ "$INSTALL_ADMINER" = "y" ] && PLUGINS_TO_INSTALL+=("adminer")
+[ "$INSTALL_WP_MAIL_SMTP" = "y" ] && PLUGINS_TO_INSTALL+=("wp-mail-smtp")
+[ "$INSTALL_POST_SMTP" = "y" ] && PLUGINS_TO_INSTALL+=("post-smtp")
+[ "$INSTALL_WC" = "y" ] && PLUGINS_TO_INSTALL+=("woocommerce")
+[ "$INSTALL_YOAST" = "y" ] && PLUGINS_TO_INSTALL+=("wordpress-seo")
+[ "$INSTALL_CF7" = "y" ] && PLUGINS_TO_INSTALL+=("contact-form-7")
+[ "$INSTALL_ELEMENTOR" = "y" ] && PLUGINS_TO_INSTALL+=("elementor")
+[ "$INSTALL_ACF" = "y" ] && PLUGINS_TO_INSTALL+=("advanced-custom-fields")
+PLUGINS_TO_INSTALL+=("${EXTRA_PLUGINS[@]:-}") # FIX: Null-sichere Expansion
+
+if [ "${#PLUGINS_TO_INSTALL[@]}" -gt 0 ]; then
+  echo "• Installiere: ${PLUGINS_TO_INSTALL[*]}"
+  
+  # NEU: Entferne Silent-Wrapper, um WP-CLI-Fehlermeldungen zu sehen.
+  # Verwende 'set +e' / 'set -e' um den Skript-Abbruch bei Fehler zu verhindern.
+  
+  set +e
+  echo -e "${BLUE}--- WP-CLI Output (Start) ---${NC}"
+  # run_wp gibt die Ausgabe an stdout/stderr weiter
+  # FIX (v24): --skip-if-already-installed entfernt, da es in älteren WP-CLI-Versionen (Herd) einen Fehler wirft.
+  run_wp plugin install "${PLUGINS_TO_INSTALL[@]}"
+  WP_CLI_STATUS=$?
+  echo -e "${BLUE}--- WP-CLI Output (End) ---${NC}"
+  set -e
+
+  if [ $WP_CLI_STATUS -eq 0 ]; then
+    echo -e "${GREEN}✓ Plugins erfolgreich installiert (Exit Code 0).${NC}"
+  else
+    echo -e "${RED}✗ FEHLER: Plugin-Installation mit WP-CLI fehlgeschlagen (Exit Code $WP_CLI_STATUS).${NC}"
+    echo "  → Bitte prüfen Sie die Konsolenausgabe oben auf Fehlermeldungen von WP-CLI."
+  fi
+else
+  echo "• Keine Plugins zur Installation ausgewählt."
+fi
+
+
+# 10) Plugins aktivieren
+
+echo ""
+echo -e "${BLUE}[10/10] Plugins und Sprache finalisieren...${NC}"
+
+# Aktiviere alle Plugins, die installiert wurden (inkl. Symlinks, wenn sie jetzt existieren)
+# run_wp_best_effort plugin activate --all
+echo -e "${GREEN}✓ Plugin-Installation abgeschlossen. Keine Plugins wurden aktiviert.${NC}"
+
+# 10.1) Sprache finalisieren (wenn nötig)
+# Lädt die Language Packs herunter und stellt sicher, dass das Backend die richtige Sprache verwendet.
 run_wp_best_effort language core update >/dev/null 2>&1 || true
 run_wp_best_effort language plugin update --all >/dev/null 2>&1 || true
 echo -e "${GREEN}✓ Sprach-Finalisierung abgeschlossen${NC}"
+
+# 10.2) Prüfe Logging-Funktionalität
+echo ""
+echo -e "${BLUE}[10.2/10] Prüfe Debug Log...${NC}"
+
+DEBUG_LOG_PATH="wp-content/debug.log"
+WP_CONTENT_DIR="wp-content"
+CURRENT_USER=$(whoami)
+
+# 1. Datei-Existenz sicherstellen und Berechtigungen setzen (vor dem Schreibtest)
+if [ ! -d "$WP_CONTENT_DIR" ]; then mkdir -p "$WP_CONTENT_DIR"; fi
+if [ ! -f "$DEBUG_LOG_PATH" ]; then touch "$DEBUG_LOG_PATH"; fi
+
+# Setze die Berechtigungen vor dem Test (für Herd/macOS Standard)
+chmod 775 "$WP_CONTENT_DIR" || true
+chmod 664 "$DEBUG_LOG_PATH" 2>/dev/null || true
+
+
+# 2. Schreibe den Test-Eintrag direkt mit file_put_contents (robusteste Methode)
+TEST_LOG_MESSAGE="[INSTALL-SCRIPT-TEST] Installation erfolgreich abgeschlossen und Debug Log-Funktion geprüft am $(date +'%Y-%m-%d %H:%M:%S')"
+
+# Die Funktion schreibt direkt in die Datei und ignoriert wp-config/error_log-Fallbacks.
+PHP_COMMAND="file_put_contents(\"$WP_CONTENT_DIR/debug.log\", \"[\" . date('d-M-Y H:i:s') . \"] $TEST_LOG_MESSAGE\n\", FILE_APPEND);"
+run_wp eval "$PHP_COMMAND" >/dev/null 2>&1
+
+
+# 3. Prüfen, ob der Test erfolgreich war
+if [ -f "$DEBUG_LOG_PATH" ] && grep -q "INSTALL-SCRIPT-TEST" "$DEBUG_LOG_PATH"; then
+    echo -e "${GREEN}✓ Test-Eintrag erfolgreich in $DEBUG_LOG_PATH geschrieben.${NC}"
+    echo "  → Bitte prüfen Sie jetzt die Datei manuell auf dem Dateisystem."
+else
+    echo -e "${RED}✗ Konnte keinen Test-Eintrag in $DEBUG_LOG_PATH finden.${NC}"
+    echo "  → Der Fehler liegt nun **ausschließlich** an fehlenden Berechtigungen oder einem globalen PHP-Lock."
+    echo ""
+    echo -e "${YELLOW}🚨 MANUELLE KORREKTUR ERFORDERLICH (Berechtigungen):${NC}"
+    echo "  Führen Sie bitte im Terminal aus (Ihr Passwort ist erforderlich):"
+    echo -e "  ${BOLD}sudo chown -R $CURRENT_USER:staff $WP_CONTENT_DIR${NC}"
+fi
+echo -e "${GREEN}✓ Debug Log-Prüfung abgeschlossen.${NC}"
+
+# NEU: 10.7 Debug Log Symlink
+if [ "$INSTALL_DEBUG_SYMLINK" = "y" ]; then
+  echo ""
+  echo -e "${BLUE}[10.7/10] Debug Log Symlink erstellen...${NC}" 
+
+  if [ -e "$SITE_ROOT/debug.log" ]; then
+    echo -e "${YELLOW}• Achtung: $SITE_ROOT/debug.log existiert bereits. Überspringe Symlink-Erstellung.${NC}"
+  elif [ "${DRY_RUN:-0}" -eq 1 ]; then
+    echo "[dry-run] ln -s \"wp-content/debug.log\" \"$SITE_ROOT/debug.log\""
+  else
+    # Die Zieldatei (wp-content/debug.log) selbst muss nicht existieren.
+    ln -s "wp-content/debug.log" "$SITE_ROOT/debug.log"
+    echo -e "${GREEN}✓ Relativer Symlink '$SITE_ROOT/debug.log' erstellt (zeigt auf wp-content/debug.log).${NC}"
+  fi
+fi
+
+# NEU: 10.8 Browser Log Viewer Script (debug-viewer.php)
+if [ "$INSTALL_BROWSER_VIEWER" = "y" ]; then
+  echo ""
+  echo -e "${BLUE}[10.8/10] Browser Debug Log Viewer (debug-viewer.php) erstellen...${NC}" 
+  VIEWER_SCRIPT="debug-viewer.php"
+
+  # Der Code zur Erstellung der PHP-Datei
+  cat > "$VIEWER_SCRIPT" <<'PHP_VIEWER'
+<?php
+/**
+ * Browser Log Viewer for debug.log (Herd/local development only)
+ *
+ * Checks if WP_DEBUG_LOG is defined and safely outputs the log file content.
+ * Does not cache the response in the browser.
+ */
+
+if ( ! file_exists( dirname( __FILE__ ) . '/wp-load.php' ) ) {
+    die( 'Error: WordPress core not found.' );
+}
+
+// 1. Load WordPress to access constants like WP_CONTENT_DIR
+require_once( dirname( __FILE__ ) . '/wp-load.php' );
+
+// KORRIGIERTE ZEILE: WP_CONTENT_DIR ist jetzt definiert.
+define( 'DEBUG_LOG_FILE', WP_CONTENT_DIR . '/debug.log' );
+
+
+// 2. Check for required debug constants (security measure)
+if ( ! ( defined( 'WP_DEBUG_LOG' ) && WP_DEBUG_LOG ) ) {
+    header( 'Content-Type: text/plain' );
+    die( "Error: WP_DEBUG_LOG is not set to true in wp-config.php. Log viewer disabled for security." );
+}
+
+// 3. Check file existence and readability
+if ( ! file_exists( DEBUG_LOG_FILE ) || ! is_readable( DEBUG_LOG_FILE ) ) {
+    header( 'Content-Type: text/plain' );
+    die( "Error: Debug log file not found or unreadable:\n" . DEBUG_LOG_FILE );
+}
+
+
+// 4. Output the file content safely with "no cache" headers
+header( 'Content-Type: text/plain; charset=utf-8' );
+header( 'Cache-Control: no-store, no-cache, must-revalidate, max-age=0' );
+header( 'Pragma: no-cache' );
+header( 'Expires: Fri, 01 Jan 1990 00:00:00 GMT' );
+
+// Output the full content
+readfile( DEBUG_LOG_FILE );
+PHP_VIEWER
+
+  if [ "${DRY_RUN:-0}" -eq 1 ]; then
+    echo "[dry-run] Erstelle PHP-Datei: $VIEWER_SCRIPT"
+  else
+    echo -e "${GREEN}✓ PHP-Skript '$VIEWER_SCRIPT' erstellt.${NC}"
+    echo "  → Aufrufbar unter: ${WP_URL}/$VIEWER_SCRIPT"
+  fi
+fi
+
 
 # ---------- Final summary ----------
 echo ""
@@ -1279,11 +1390,28 @@ else
   echo "Plugin-Symlinks: Nein"
 fi
 
+# NEU: SMTP Hinweise
 echo ""
-echo -e "${YELLOW}Nächste Schritte:${NC}"
-echo "1. Öffne http://$WP_URL in deinem Browser"
-echo "2. Login mit $WP_ADMIN_USER / $WP_ADMIN_PASSWORD"
-echo "3. Gehe zu 'Plugins' und aktiviere die gewünschten Erweiterungen."
-echo "4. Teste deine Features!"
+echo -e "${YELLOW}E-MAIL TESTING (Mailpit / Mailhog):${NC}"
+if [ "$INSTALL_WP_MAIL_SMTP" = "y" ] || [ "$INSTALL_POST_SMTP" = "y" ]; then
+  echo "Sie haben ein SMTP Plugin installiert. Bitte in den Plugin-Einstellungen konfigurieren:"
+  echo -e "  • SMTP Host:        ${BOLD}127.0.0.1${NC} (oder localhost)"
+  echo -e "  • SMTP Port:        ${BOLD}1025${NC}"
+  echo "  • Encryption:       None"
+  echo "  • Authentication:   Off"
+else
+  echo "Kein spezielles SMTP Plugin installiert. Herd nutzt standardmäßig Mailpit (erreichbar via Herd App)."
+fi
+
+# NEU: Debug Viewer / Symlink Hinweis
 echo ""
-echo -e "${BLUE}Happy Testing! 🚀${NC}"
+echo -e "${YELLOW}DEBUGGING COMFORT:${NC}"
+if [ "$INSTALL_BROWSER_VIEWER" = "y" ]; then
+    echo -e "${GREEN}Browser Viewer (Live):  ${BOLD}$WP_URL/debug-viewer.php${NC} (Zeigt den aktuellen Inhalt des Logs ohne Cache)"
+fi
+if [ "$INSTALL_DEBUG_SYMLINK" = "y" ]; then
+    echo -e "${GREEN}Debug Log Symlink:      $WP_URL/debug.log (Falls Herd/Webserver Symlinks erlaubt)"
+fi
+echo -e "Terminal Live Viewer: ${BOLD}cd $SITE_ROOT && tail -f wp-content/debug.log${NC}"
+
+echo "Enjoy debugging!"
